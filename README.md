@@ -1,97 +1,89 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# LeggiMi
 
-# Getting Started
+**Listen to your documents.** LeggiMi is an offline text‑to‑speech reader for Android: open (or *share*) a PDF, Word, TXT or RTF file and it reads it aloud, highlighting each sentence as it goes — like karaoke for documents.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+<p align="center">
+  <img src="docs/home.png" alt="LeggiMi home screen" width="280" />
+</p>
 
-## Step 1: Start Metro
+## Features
 
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
+- **Reads many formats** — PDF, DOCX (Word), RTF, TXT, Markdown and other plain‑text files.
+- **Share from any app** — send a file to LeggiMi from another app and it opens and starts reading automatically.
+- **Sentence karaoke** — the sentence being spoken is highlighted and the view auto‑scrolls to follow along; tap any sentence to start reading from there.
+- **Comfortable reader** — light / dark / sepia themes and an adjustable text size.
+- **Playback controls** — play / pause, previous / next sentence, and a one‑tap speed control (0.75×–2.0×).
+- **Resume where you left off** — reading position is saved per document.
+- **Chapter / section index** — auto‑detected headings (or evenly split parts) in a slide‑up table of contents.
+- **Pick your voice** — choose among the Italian TTS voices installed on the phone, preview them with one tap, or install more.
+- **Works offline** — text extraction (including PDF) runs entirely on the device; no network required.
 
-To start the Metro dev server, run the following command from the root of your React Native project:
+## How it works
 
+- **PDF** — text is extracted on‑device by [pdf.js](https://mozilla.github.io/pdf.js/) running in a hidden, offline WebView (the library ships in `android/app/src/main/assets/pdfjs/`).
+- **DOCX** — the `.docx` archive is unzipped with [JSZip](https://stuk.github.io/jszip/) and text is pulled from `word/document.xml`.
+- **RTF / TXT / Markdown** — read directly, with light cleanup (de‑hyphenation, removing repeated headers/footers and page numbers).
+- **Speech** — the extracted text is split into sentences and spoken with the device's TTS engine via [react-native-tts](https://github.com/ak1394/react-native-tts). The default reading language is Italian (`it-IT`).
+- **Sharing** — incoming files are received with [react-native-receive-sharing-intent](https://github.com/Sairyss/react-native-receive-sharing-intent); the activity uses `singleTask` + `onNewIntent` so shares are caught whether the app is closed or already open.
+
+## Getting started
+
+### Prerequisites
+- Node.js ≥ 20
+- JDK 17+
+- Android SDK (and an Android device or emulator). Set up your environment per the [React Native docs](https://reactnative.dev/docs/set-up-your-environment).
+
+### Install dependencies
 ```sh
-# Using npm
+npm install
+```
+
+### Run (debug)
+```sh
+# start the Metro bundler
 npm start
 
-# OR using Yarn
-yarn start
-```
-
-## Step 2: Build and run your app
-
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
-
-### Android
-
-```sh
-# Using npm
+# in another terminal, build & launch on a connected device/emulator
 npm run android
-
-# OR using Yarn
-yarn android
+# with multiple devices: npx react-native run-android --deviceId <id>
 ```
 
-### iOS
-
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
-
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
-
+### Build a release APK
+The `release` build type is signed with the bundled debug keystore, so it produces a self‑contained, installable APK out of the box.
 ```sh
-bundle install
+cd android
+./gradlew assembleRelease          # Windows: .\gradlew.bat assembleRelease
+# install on a specific device
+adb -s <deviceId> install -r app/build/outputs/apk/release/app-release.apk
+```
+The output APK is at `android/app/build/outputs/apk/release/app-release.apk`.
+
+> Tip: in Android Studio you can simply open the `android/` folder and press **Run** to build and deploy to your device.
+
+## Using the app
+
+1. Tap the folder icon (top‑left) to open a document, or **Share** a file to LeggiMi from any other app.
+2. Press **▶** to start; tap any sentence to jump there.
+3. Tap **Aa** (top‑right) for theme, text size, reading speed and **voice**.
+4. The **☰** icon opens the chapter/section index when available.
+
+### Voices
+LeggiMi reads in Italian by default. To choose or add a voice: **Aa → Voce**. Tap a voice to hear a short preview; your choice is saved automatically. Use **“+ Installa altre voci…”** to download additional / higher‑quality voices from Android's text‑to‑speech settings. If no Italian voice is installed, install one there first.
+
+## Tech stack
+
+React Native 0.83 (New Architecture / Fabric, Hermes) · react-native-tts · pdf.js · JSZip · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-safe-area-context.
+
+## Project structure
+
+```
+App.tsx                         # the entire app (UI, extraction, TTS, sharing)
+index.js                        # entry point
+android/                        # native Android project
+  app/src/main/assets/pdfjs/    # offline pdf.js for PDF text extraction
+  app/src/main/java/.../MainActivity.kt
 ```
 
-Then, and every time you update your native dependencies, run:
-
-```sh
-bundle exec pod install
-```
-
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
-
-```sh
-# Using npm
-npm run ios
-
-# OR using Yarn
-yarn ios
-```
-
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
-
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
-
-## Step 3: Modify your app
-
-Now that you have successfully run the app, let's make changes!
-
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+## Notes
+- Scanned/image‑only PDFs have no embedded text, so they can't be read without OCR (not included).
+- The app requests no storage permission; shared files are copied into the app cache before reading.
