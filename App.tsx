@@ -1,12 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
-  TouchableOpacity,
-  ScrollView,
   StyleSheet,
-  Platform,
   Alert,
+  Pressable,
+  FlatList,
+  Modal,
+  ActivityIndicator,
+  StatusBar,
+  ScrollView,
+  useColorScheme,
 } from "react-native";
 
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -22,8 +26,74 @@ import ReceiveSharingIntent from "react-native-receive-sharing-intent";
 
 type Picked = { name: string; uri: string; type?: string | null };
 type Chapter = { title: string; startIndex: number; endIndex: number };
+type ThemeName = "dark" | "light" | "sepia";
 
 const SETTINGS_RATE_KEY = "settings:ttsRate";
+const SETTINGS_THEME_KEY = "settings:theme";
+const SETTINGS_FONT_KEY = "settings:fontIndex";
+
+const FONT_SIZES = [15, 17, 19, 21, 24, 27, 31];
+const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+
+type Palette = {
+  bg: string;
+  surface: string;
+  surface2: string;
+  text: string;
+  dim: string;
+  border: string;
+  accent: string;
+  onAccent: string;
+  hlBg: string;
+  hlText: string;
+  hlBar: string;
+  statusBar: "light-content" | "dark-content";
+};
+
+const THEMES: Record<ThemeName, Palette> = {
+  dark: {
+    bg: "#0B0B0C",
+    surface: "#161618",
+    surface2: "#212124",
+    text: "#ECECEC",
+    dim: "#9A9AA0",
+    border: "#2A2A2E",
+    accent: "#3B82F6",
+    onAccent: "#FFFFFF",
+    hlBg: "#16314F",
+    hlText: "#FFFFFF",
+    hlBar: "#3B82F6",
+    statusBar: "light-content",
+  },
+  light: {
+    bg: "#FBFBFC",
+    surface: "#FFFFFF",
+    surface2: "#F1F2F4",
+    text: "#16181C",
+    dim: "#6B7280",
+    border: "#E4E4E7",
+    accent: "#2563EB",
+    onAccent: "#FFFFFF",
+    hlBg: "#DCEAFE",
+    hlText: "#0B1220",
+    hlBar: "#2563EB",
+    statusBar: "dark-content",
+  },
+  sepia: {
+    bg: "#F3EAD6",
+    surface: "#EEE3C9",
+    surface2: "#E6DABA",
+    text: "#3A2F1C",
+    dim: "#8A7A55",
+    border: "#DDCDA3",
+    accent: "#B0712A",
+    onAccent: "#FFFFFF",
+    hlBg: "#E7D6A6",
+    hlText: "#2A2110",
+    hlBar: "#B0712A",
+    statusBar: "dark-content",
+  },
+};
 
 function extOf(name: string) {
   const m = name.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -35,14 +105,10 @@ function isTextLikeExt(ext: string) {
   ].includes(ext);
 }
 async function copySharedUriToCache(sharedUri: string, fileName: string) {
-  // path reale in cache
   const safeName = (fileName || "shared").replace(/[^\w.\-() ]+/g, "_");
   const destPath = `${RNFS.CachesDirectoryPath}/${Date.now()}_${safeName}`;
-
-  // RNFS su Android copia anche da content://
-  // Se sharedUri è file://, va bene lo stesso.
   await RNFS.copyFile(sharedUri, destPath);
-  return destPath; // path locale "vero"
+  return destPath;
 }
 
 function stripRtf(rtf: string) {
@@ -160,7 +226,14 @@ function sanitizeForTtsStrong(s: string) {
     .trim();
 }
 
-function segmentTextForKaraoke(raw: string, maxChars = 700) {
+// Divide un paragrafo in frasi. La voce TTS suona meglio per frase
+// e l'evidenziazione segue il testo molto piu' da vicino.
+function splitSentences(paragraph: string): string[] {
+  const parts = paragraph.split(/(?<=[.!?…])\s+(?=[«"'(\[\d\p{Lu}])/u);
+  return parts.map((s) => s.trim()).filter(Boolean);
+}
+
+function segmentIntoSentences(raw: string, maxChars = 280, minMerge = 45): string[] {
   const t = normalizeText(raw);
   if (!t) return [];
 
@@ -170,31 +243,39 @@ function segmentTextForKaraoke(raw: string, maxChars = 700) {
     if (lines.length >= 8) blocks = lines;
   }
 
-  const segments: string[] = [];
-  const sentenceSplit = /(?<=[\.\!\?\:;])\s+/g;
-
-  for (const b0 of blocks) {
-    const b = b0.trim();
-    if (!b) continue;
-
-    if (b.length <= maxChars) { segments.push(b); continue; }
-
-    const sentences = b.split(sentenceSplit).map((s) => s.trim()).filter(Boolean);
-    let acc = "";
-    for (const s of sentences) {
-      if (!acc) { acc = s; continue; }
-      if ((acc + " " + s).length <= maxChars) acc += " " + s;
-      else { segments.push(acc); acc = s; }
+  const out: string[] = [];
+  for (const block of blocks) {
+    const firstLine = block.split("\n")[0] ?? block;
+    if (isChapterHeading(firstLine) && block.length <= 90) {
+      out.push(block);
+      continue;
     }
-    if (acc) segments.push(acc);
-  }
 
-  const final: string[] = [];
-  for (const seg of segments) {
-    if (seg.length <= maxChars * 1.3) final.push(seg);
-    else for (let i = 0; i < seg.length; i += maxChars) final.push(seg.slice(i, i + maxChars));
+    const sentences = splitSentences(block);
+    let acc = "";
+    const flush = () => { if (acc) { out.push(acc); acc = ""; } };
+
+    for (const s of sentences) {
+      if (s.length > maxChars) {
+        flush();
+        let rest = s;
+        while (rest.length > maxChars) {
+          let cut = rest.lastIndexOf(", ", maxChars);
+          if (cut < maxChars * 0.5) cut = rest.lastIndexOf(" ", maxChars);
+          if (cut <= 0) cut = maxChars;
+          out.push(rest.slice(0, cut).trim());
+          rest = rest.slice(cut).trim();
+        }
+        acc = rest;
+        continue;
+      }
+      if (!acc) acc = s;
+      else if (acc.length < minMerge) acc += " " + s; // unisci frasi troppo corte
+      else { flush(); acc = s; }
+    }
+    flush();
   }
-  return final.filter(Boolean);
+  return out.filter(Boolean);
 }
 
 function isChapterHeading(line: string) {
@@ -212,7 +293,7 @@ function isChapterHeading(line: string) {
 function cleanHeadingTitle(s: string) {
   return s.replace(/^#{1,6}\s+/, "").trim();
 }
-function buildChapters(segs: string[]): Chapter[] {
+function buildChapters(segs: string[], groupSize = 40): Chapter[] {
   const heads: { idx: number; title: string }[] = [];
   segs.forEach((seg, i) => {
     const firstLine = seg.split("\n")[0] ?? seg;
@@ -229,12 +310,13 @@ function buildChapters(segs: string[]): Chapter[] {
     return chapters;
   }
 
-  const N = 10;
-  if (segs.length <= N) return [{ title: "Testo", startIndex: 0, endIndex: Math.max(0, segs.length - 1) }];
+  if (segs.length <= groupSize) {
+    return [{ title: "Documento", startIndex: 0, endIndex: Math.max(0, segs.length - 1) }];
+  }
 
   const chapters: Chapter[] = [];
-  for (let i = 0, part = 1; i < segs.length; i += N, part++) {
-    chapters.push({ title: `Parte ${part}`, startIndex: i, endIndex: Math.min(segs.length - 1, i + N - 1) });
+  for (let i = 0, part = 1; i < segs.length; i += groupSize, part++) {
+    chapters.push({ title: `Parte ${part}`, startIndex: i, endIndex: Math.min(segs.length - 1, i + groupSize - 1) });
   }
   return chapters;
 }
@@ -252,12 +334,10 @@ async function saveProgress(fid: string, idx: number) {
 }
 
 /**
- * PDF extraction offline: pdf.js letto da assets (android/app/src/main/assets/pdfjs/pdf.min.js)
- * Worker disabilitato per semplicità/offline (più lento ma affidabile).
+ * PDF extraction offline: pdf.js letto da assets (android/app/src/main/assets/pdfjs/pdf.min.mjs)
  */
 const pdfJsHtmlOffline = (pdfBase64: string) => {
   const safeB64 = JSON.stringify(pdfBase64);
-
   return `
 <!doctype html>
 <html>
@@ -268,10 +348,7 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
 <body style="margin:0;background:#000;">
 <script type="module">
   try {
-    // ✅ IMPORT ASSOLUTO (FONDAMENTALE)
     const pdfjsLib = await import("file:///android_asset/pdfjs/pdf.min.mjs");
-
-    // ✅ worker esplicito (anche se disableWorker)
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "file:///android_asset/pdfjs/pdf.worker.min.mjs";
 
@@ -284,7 +361,7 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
 
     const pdf = await pdfjsLib.getDocument({
       data: uint8,
-      disableWorker: true, // offline + stabile
+      disableWorker: true,
     }).promise;
 
     let full = "";
@@ -309,8 +386,53 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
 `;
 };
 
+type RowProps = {
+  text: string;
+  index: number;
+  active: boolean;
+  fontSize: number;
+  palette: Palette;
+  onPress: (i: number) => void;
+};
+const SegmentRow = React.memo(function SegmentRow({
+  text, index, active, fontSize, palette, onPress,
+}: RowProps) {
+  return (
+    <Pressable
+      onPress={() => onPress(index)}
+      android_ripple={{ color: palette.border }}
+      style={[
+        rowStyles.row,
+        { borderLeftColor: active ? palette.hlBar : "transparent" },
+        active && { backgroundColor: palette.hlBg },
+      ]}
+    >
+      <Text
+        style={{
+          color: active ? palette.hlText : palette.text,
+          fontSize,
+          lineHeight: Math.round(fontSize * 1.55),
+        }}
+      >
+        {text}
+      </Text>
+    </Pressable>
+  );
+});
+
+const rowStyles = StyleSheet.create({
+  row: {
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+    borderLeftWidth: 3,
+    borderRadius: 6,
+    marginVertical: 1,
+  },
+});
+
 function AppInner() {
   const insets = useSafeAreaInsets();
+  const systemScheme = useColorScheme();
 
   const [picked, setPicked] = useState<Picked | null>(null);
 
@@ -330,58 +452,99 @@ function AppInner() {
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const pendingAutoStartRef = useRef(false);
 
+  const [themeName, setThemeName] = useState<ThemeName>("dark");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [fontIndex, setFontIndex] = useState(2);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chaptersOpen, setChaptersOpen] = useState(false);
 
   const stopRef = useRef(false);
   const [ttsReady, setTtsReady] = useState(false);
   const ttsErrorShownRef = useRef(false);
   const sessionRef = useRef(0);
 
-  const scrollRef = useRef<ScrollView | null>(null);
-  const containerRef = useRef<View | null>(null);
-  const segmentRefs = useRef<Record<number, Text | null>>({});
+  const isReadingRef = useRef(false);
+  useEffect(() => { isReadingRef.current = isReading; }, [isReading]);
+  const isPausedRef = useRef(false);
+  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+  const fileIdRef = useRef<string | null>(null);
+  useEffect(() => { fileIdRef.current = fileId; }, [fileId]);
+  const rateRef = useRef(rate);
+  useEffect(() => { rateRef.current = rate; }, [rate]);
 
+  const listRef = useRef<FlatList<string> | null>(null);
+  const processingShareRef = useRef(false);
+
+  const palette = THEMES[themeName];
+  const fontSize = FONT_SIZES[fontIndex] ?? 19;
+  const s = useMemo(() => makeStyles(palette), [palette]);
+
+  const pct = segments.length ? Math.round(((currentIdx + 1) / segments.length) * 100) : 0;
   const canRead = useMemo(
-    () => segments.length > 0 && segments[currentIdx]?.trim().length > 0,
+    () => segments.length > 0 && (segments[currentIdx]?.trim().length ?? 0) > 0,
     [segments, currentIdx]
   );
 
+  const currentChapterIdx = useMemo(() => {
+    if (!chapters.length) return -1;
+    for (let i = 0; i < chapters.length; i++) {
+      if (currentIdx >= chapters[i].startIndex && currentIdx <= chapters[i].endIndex) return i;
+    }
+    return -1;
+  }, [chapters, currentIdx]);
+
+  // ====== AUTOSCROLL: tieni la frase in lettura in vista ======
+  const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32) => {
+    const list = listRef.current;
+    if (!list || index < 0 || index >= segmentsRef.current.length) return;
+    try {
+      list.scrollToIndex({ index, viewPosition, animated: true });
+    } catch {}
+  }, []);
 
   useEffect(() => {
     if (!segments.length) return;
-    const node = segmentRefs.current[currentIdx];
-    const containerNode = containerRef.current;
-    if (!node || !containerNode || !scrollRef.current) return;
+    scrollToIndexSafe(currentIdx);
+  }, [currentIdx, segments.length, scrollToIndexSafe]);
 
-    try {
-      // @ts-ignore
-      node.measureLayout(
-        // @ts-ignore
-        containerNode,
-        (_x: number, y: number) => {
-          scrollRef.current?.scrollTo({ y: Math.max(0, y - 20), animated: true });
-        },
-        () => {}
-      );
-    } catch {}
-  }, [currentIdx, segments.length]);
-
-  // load settings
+  // ====== SETTINGS ======
   useEffect(() => {
     (async () => {
       try {
-        const savedRate = await AsyncStorage.getItem(SETTINGS_RATE_KEY);
-        if (savedRate) {
-          const v = Number(savedRate);
-          if (!Number.isNaN(v)) setRate(v);
+        const [savedRate, savedTheme, savedFont] = await Promise.all([
+          AsyncStorage.getItem(SETTINGS_RATE_KEY),
+          AsyncStorage.getItem(SETTINGS_THEME_KEY),
+          AsyncStorage.getItem(SETTINGS_FONT_KEY),
+        ]);
+        if (savedRate) { const v = Number(savedRate); if (!Number.isNaN(v)) setRate(v); }
+        if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "sepia") {
+          setThemeName(savedTheme);
+        } else {
+          setThemeName(systemScheme === "light" ? "light" : "dark");
+        }
+        if (savedFont != null) {
+          const fi = Number(savedFont);
+          if (Number.isInteger(fi) && fi >= 0 && fi < FONT_SIZES.length) setFontIndex(fi);
         }
       } catch {}
+      setSettingsLoaded(true);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // init TTS
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    AsyncStorage.setItem(SETTINGS_THEME_KEY, themeName).catch(() => {});
+  }, [themeName, settingsLoaded]);
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    AsyncStorage.setItem(SETTINGS_FONT_KEY, String(fontIndex)).catch(() => {});
+  }, [fontIndex, settingsLoaded]);
+
+  // ====== TTS INIT ======
   useEffect(() => {
     let subErr: any = null;
-
     (async () => {
       try {
         await Tts.getInitStatus();
@@ -408,14 +571,14 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // apply + save rate
   useEffect(() => {
+    if (!settingsLoaded) return;
     AsyncStorage.setItem(SETTINGS_RATE_KEY, String(rate)).catch(() => {});
     if (!ttsReady) return;
     Tts.setDefaultRate(rate, true).catch(() => {});
-  }, [rate, ttsReady]);
+  }, [rate, ttsReady, settingsLoaded]);
 
-  // ====== CORE CONTROLS ======
+  // ====== CONTROLLI TTS ======
   const hardStop = async () => {
     stopRef.current = true;
     sessionRef.current += 1;
@@ -442,19 +605,13 @@ function AppInner() {
     } catch {
       const b = sanitizeForTtsStrong(text);
       if (!b) return true;
-      try {
-        await Tts.speak(b);
-        return true;
-      } catch {
-        return false;
-      }
+      try { await Tts.speak(b); return true; } catch { return false; }
     }
   };
 
   const waitTtsDone = async (sessionToken: number, timeoutMs = 60000) => {
     return await new Promise<void>((resolve) => {
       let done = false;
-
       let subFinish: any = null;
       let subCancel: any = null;
       let subError: any = null;
@@ -462,14 +619,11 @@ function AppInner() {
       const cleanupAndResolve = () => {
         if (done) return;
         done = true;
-
         clearTimeout(timer);
         clearInterval(interval);
-
         try { subFinish?.remove?.(); } catch {}
         try { subCancel?.remove?.(); } catch {}
         try { subError?.remove?.(); } catch {}
-
         resolve();
       };
 
@@ -490,11 +644,10 @@ function AppInner() {
 
     stopRef.current = false;
     ttsErrorShownRef.current = false;
-
     const sessionToken = (sessionRef.current += 1);
 
     try { await Tts.getInitStatus(); } catch {}
-    try { await Tts.setDefaultRate(rate, true); } catch {}
+    try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
     try { await Tts.setDefaultLanguage("it-IT"); } catch {}
     await Tts.stop();
 
@@ -503,25 +656,27 @@ function AppInner() {
 
     let i = Math.max(0, Math.min(startIndex, segs.length - 1));
     setCurrentIdx(i);
-    if (fileId) await saveProgress(fileId, i);
+    if (fileIdRef.current) await saveProgress(fileIdRef.current, i);
 
     for (; i < segs.length; i++) {
       if (sessionRef.current !== sessionToken) break;
       if (stopRef.current) break;
 
       setCurrentIdx(i);
-      if (fileId) await saveProgress(fileId, i);
+      if (fileIdRef.current) await saveProgress(fileIdRef.current, i);
 
       const ok = await speakOne(segs[i]);
       if (!ok && !ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
         Alert.alert("Sintesi vocale", "Alcune parti non sono leggibili dal TTS. Riduci la velocità o cambia voce TTS.");
       }
-
       await waitTtsDone(sessionToken, 60000);
     }
 
-    if (sessionRef.current === sessionToken) setIsReading(false);
+    if (sessionRef.current === sessionToken) {
+      setIsReading(false);
+      setIsPaused(false);
+    }
   };
 
   const onPlayPress = async () => {
@@ -534,129 +689,131 @@ function AppInner() {
     const next = Math.max(0, Math.min(currentIdx + delta, Math.max(0, segmentsRef.current.length - 1)));
     setCurrentIdx(next);
     if (fileId) saveProgress(fileId, next).catch(() => {});
-    if (isReading || isPaused) {
-      hardStop().then(() => speakFrom(next));
-    }
+    if (isReading) hardStop().then(() => speakFrom(next));
   };
 
   const skipToChapter = (ch: Chapter) => {
+    setChaptersOpen(false);
     const next = ch.startIndex;
     setCurrentIdx(next);
     if (fileId) saveProgress(fileId, next).catch(() => {});
-    if (isReading || isPaused) {
-      hardStop().then(() => speakFrom(next));
-    }
+    if (isReading) hardStop().then(() => speakFrom(next));
+    else scrollToIndexSafe(next, 0.1);
   };
+
+  // Tap su una frase: sposta il cursore e, se sta leggendo, riparte da lì.
+  const onPressSegment = useCallback((index: number) => {
+    setCurrentIdx(index);
+    if (fileIdRef.current) saveProgress(fileIdRef.current, index).catch(() => {});
+    if (isReadingRef.current) hardStop().then(() => speakFrom(index));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const cycleSpeed = () => {
+    const idx = SPEED_PRESETS.findIndex((v) => Math.abs(v - rate) < 0.01);
+    const next = SPEED_PRESETS[(idx + 1) % SPEED_PRESETS.length] ?? 1.0;
+    setRate(next);
+  };
+
+  const goToCurrent = () => scrollToIndexSafe(currentIdx, 0.32);
 
   // ====== APPLY TEXT ======
   const applyTextForCurrentFile = async (fid: string, text: string) => {
     const cleaned = postCleanExtractedText(text);
     setRawText(cleaned);
 
-    const segs = segmentTextForKaraoke(cleaned, 700);
+    const segs = segmentIntoSentences(cleaned);
     segmentsRef.current = segs;
     setSegments(segs);
-
-    const ch = buildChapters(segs);
-    setChapters(ch);
+    setChapters(buildChapters(segs));
 
     const savedIdx = await loadProgress(fid);
     const clamped = Math.max(0, Math.min(savedIdx, Math.max(0, segs.length - 1)));
     setCurrentIdx(clamped);
-
     return clamped;
   };
 
-const openFileFromUri = async (
-  name: string,
-  uri: string,
-  mime: string | null | undefined,
-  autoStart: boolean,
-  fromShare: boolean
-) => {
-  setIsExtracting(true);
-  await hardStop();
+  const openFileFromUri = async (
+    name: string,
+    uri: string,
+    mime: string | null | undefined,
+    autoStart: boolean,
+    fromShare: boolean
+  ) => {
+    setIsExtracting(true);
+    await hardStop();
+    setSegments([]);
+    segmentsRef.current = [];
+    setChapters([]);
+    setRawText("");
 
-  setPicked({ name, uri, type: mime ?? "" });
+    setPicked({ name, uri, type: mime ?? "" });
+    const fid = makeFileId(name, mime ?? "");
+    setFileId(fid);
 
-  const fid = makeFileId(name, mime ?? "");
-  setFileId(fid);
+    let localPath = "";
+    const ext = extOf(name);
 
-  let localPath = "";
-  const ext = extOf(name);
-
-  try {
-    if (fromShare) {
-      // ✅ SHARE: non usare keepLocalCopy (permessi transitori)
-      // uri può essere content:// oppure file://
-      localPath = await copySharedUriToCache(uri, name);
-    } else {
-      // ✅ PICKER: keepLocalCopy è ok
-      const copied = await keepLocalCopy({
-        destination: "cachesDirectory",
-        files: [{ uri, fileName: name }],
-      });
-
-      const localUri = copied[0]?.status === "success" ? copied[0].localUri : null;
-      if (!localUri) throw new Error("Impossibile creare una copia locale del file (picker).");
-
-      localPath = localUri.replace("file://", "");
-    }
-
-    // TXT / text/*
-    if (isTextLikeExt(ext) || (mime ?? "").startsWith("text/")) {
-      const raw = await RNFS.readFile(localPath, "utf8");
-      const finalText = ext === "rtf" ? stripRtf(raw) : raw;
-      const start = await applyTextForCurrentFile(fid, finalText);
-      setIsExtracting(false);
-      if (autoStart) setTimeout(() => speakFrom(start), 200);
-      return;
-    }
-
-    // RTF (alcuni device lo danno con mime non text/*)
-    if (ext === "rtf" || (mime ?? "").includes("rtf")) {
-      const raw = await RNFS.readFile(localPath, "utf8");
-      const start = await applyTextForCurrentFile(fid, stripRtf(raw));
-      setIsExtracting(false);
-      if (autoStart) setTimeout(() => speakFrom(start), 200);
-      return;
-    }
-
-    // DOCX
-    if (ext === "docx" || (mime ?? "").includes("wordprocessingml")) {
-      const docText = await extractDocxText(localPath);
-      const start = await applyTextForCurrentFile(fid, docText);
-      setIsExtracting(false);
-      if (autoStart) setTimeout(() => speakFrom(start), 200);
-      return;
-    }
-
-    // PDF
-    if (ext === "pdf" || mime === "application/pdf") {
-      const b64 = await RNFS.readFile(localPath, "base64");
-      pendingAutoStartRef.current = autoStart;
-      setPdfBase64(b64);
-      // lascia isExtracting = true finché la WebView risponde
-      return;
-    }
-
-    // Fallback: prova come testo
     try {
-      const raw = await RNFS.readFile(localPath, "utf8");
-      const start = await applyTextForCurrentFile(fid, raw);
-      setIsExtracting(false);
-      if (autoStart) setTimeout(() => speakFrom(start), 200);
-      return;
-    } catch {
-      setIsExtracting(false);
-      Alert.alert("Formato non supportato", `Non riesco a leggere:\n${name}`);
-    }
-  } catch (err: any) {
-    setIsExtracting(false);
-    Alert.alert("Errore", String(err?.message ?? err ?? "Errore apertura file"));
-  }
-};
+      if (fromShare) {
+        localPath = await copySharedUriToCache(uri, name);
+      } else {
+        const copied = await keepLocalCopy({
+          destination: "cachesDirectory",
+          files: [{ uri, fileName: name }],
+        });
+        const localUri = copied[0]?.status === "success" ? copied[0].localUri : null;
+        if (!localUri) throw new Error("Impossibile creare una copia locale del file (picker).");
+        localPath = localUri.replace("file://", "");
+      }
 
+      if (isTextLikeExt(ext) || (mime ?? "").startsWith("text/")) {
+        const raw = await RNFS.readFile(localPath, "utf8");
+        const finalText = ext === "rtf" ? stripRtf(raw) : raw;
+        const start = await applyTextForCurrentFile(fid, finalText);
+        setIsExtracting(false);
+        if (autoStart) setTimeout(() => speakFrom(start), 200);
+        return;
+      }
+
+      if (ext === "rtf" || (mime ?? "").includes("rtf")) {
+        const raw = await RNFS.readFile(localPath, "utf8");
+        const start = await applyTextForCurrentFile(fid, stripRtf(raw));
+        setIsExtracting(false);
+        if (autoStart) setTimeout(() => speakFrom(start), 200);
+        return;
+      }
+
+      if (ext === "docx" || (mime ?? "").includes("wordprocessingml")) {
+        const docText = await extractDocxText(localPath);
+        const start = await applyTextForCurrentFile(fid, docText);
+        setIsExtracting(false);
+        if (autoStart) setTimeout(() => speakFrom(start), 200);
+        return;
+      }
+
+      if (ext === "pdf" || mime === "application/pdf") {
+        const b64 = await RNFS.readFile(localPath, "base64");
+        pendingAutoStartRef.current = autoStart;
+        setPdfBase64(b64);
+        return; // isExtracting resta true finché la WebView risponde
+      }
+
+      try {
+        const raw = await RNFS.readFile(localPath, "utf8");
+        const start = await applyTextForCurrentFile(fid, raw);
+        setIsExtracting(false);
+        if (autoStart) setTimeout(() => speakFrom(start), 200);
+        return;
+      } catch {
+        setIsExtracting(false);
+        Alert.alert("Formato non supportato", `Non riesco a leggere:\n${name}`);
+      }
+    } catch (err: any) {
+      setIsExtracting(false);
+      Alert.alert("Errore", String(err?.message ?? err ?? "Errore apertura file"));
+    }
+  };
 
   const pickFile = async () => {
     try {
@@ -673,12 +830,17 @@ const openFileFromUri = async (
     }
   };
 
-  // SHARE INTENT
+  // ====== SHARE INTENT ======
+  // Nessun clearReceivedFiles(): azzererebbe per sempre il listener della libreria
+  // (singleton isClear=true). Il lato nativo annulla gia' l'intent dopo la lettura,
+  // quindi i foreground successivi tornano vuoti e non riaprono il file.
   useEffect(() => {
     ReceiveSharingIntent.getReceivedFiles(
       async (files: any[]) => {
+        if (!files || files.length === 0) return;
+        if (processingShareRef.current) return;
+        processingShareRef.current = true;
         try {
-          if (!files || files.length === 0) return;
           const f = files[0];
           const name = f?.fileName || f?.filePath?.split?.(/[\\/]/).pop?.() || "condiviso";
           const mime = f?.mimeType || "";
@@ -686,126 +848,257 @@ const openFileFromUri = async (
             f?.contentUri ||
             (f?.filePath ? (f.filePath.startsWith("file://") ? f.filePath : `file://${f.filePath}`) : null);
           if (!uri) return;
-
-          try { ReceiveSharingIntent.clearReceivedFiles(); } catch {}
           await openFileFromUri(name, uri, mime, true, true);
         } catch (e: any) {
           Alert.alert("Condivisione", String(e?.message ?? e ?? "Errore"));
           setIsExtracting(false);
+        } finally {
+          processingShareRef.current = false;
         }
       },
       () => {},
       "ShareMedia"
     );
-
-    return () => {
-      try { ReceiveSharingIntent.clearReceivedFiles(); } catch {}
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const renderItem = useCallback(
+    ({ item, index }: { item: string; index: number }) => (
+      <SegmentRow
+        text={item}
+        index={index}
+        active={index === currentIdx}
+        fontSize={fontSize}
+        palette={palette}
+        onPress={onPressSegment}
+      />
+    ),
+    [currentIdx, fontSize, palette, onPressSegment]
+  );
+
+  const busy = isExtracting;
+
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* NIENTE HEADER: spazio massimo */}
+    <View style={[s.container, { paddingTop: insets.top }]}>
+      <StatusBar barStyle={palette.statusBar} backgroundColor={palette.bg} />
 
-      {/* Capitoli/Parti */}
-      {chapters.length > 0 && segments.length > 0 && (
-        <View style={styles.chapterPanel}>
-          <ScrollView style={styles.chapterList}>
-            {chapters.map((ch, idx) => (
-              <TouchableOpacity key={idx} onPress={() => skipToChapter(ch)} style={styles.chapterRow}>
-                <Text style={styles.chapterText}>
-                  {ch.title} ({ch.startIndex + 1}–{ch.endIndex + 1})
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
-      )}
+      {/* HEADER */}
+      <View style={s.header}>
+        <Pressable onPress={pickFile} disabled={busy} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
+          <Text style={s.headerIcon}>📂</Text>
+        </Pressable>
 
-      {/* Karaoke */}
-      <View ref={containerRef as any} style={styles.textBox}>
-        <ScrollView ref={scrollRef as any} showsVerticalScrollIndicator>
-          {segments.length === 0 ? (
-            <Text style={styles.text}>{rawText || "Condividi un file su LeggiMi oppure scegli un file."}</Text>
-          ) : (
-            segments.map((seg, i) => (
-              <Text
-                key={i}
-                ref={(r) => { segmentRefs.current[i] = r; }}
-                style={[styles.text, i === currentIdx ? styles.karaoke : styles.normalSeg]}
-              >
-                {seg + "\n\n"}
-              </Text>
-            ))
+        <Pressable onPress={goToCurrent} style={s.headerTitleWrap}>
+          <Text numberOfLines={1} style={s.headerTitle}>
+            {picked?.name || "LeggiMi"}
+          </Text>
+          {segments.length > 0 && (
+            <Text numberOfLines={1} style={s.headerSub}>
+              {currentChapterIdx >= 0 ? `${chapters[currentChapterIdx].title} · ` : ""}{pct}% · frase {currentIdx + 1}/{segments.length}
+            </Text>
           )}
-        </ScrollView>
+        </Pressable>
+
+        {chapters.length > 1 && (
+          <Pressable onPress={() => setChaptersOpen(true)} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
+            <Text style={s.headerIcon}>☰</Text>
+          </Pressable>
+        )}
+        <Pressable onPress={() => setSettingsOpen(true)} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
+          <Text style={s.headerAa}>Aa</Text>
+        </Pressable>
       </View>
 
-      {/* Velocità */}
-      <View style={styles.rateBox}>
-        <Text style={styles.rateLabel}>Velocità: {rate.toFixed(2)}x</Text>
-        <Slider minimumValue={0.5} maximumValue={2.0} step={0.05} value={rate} onValueChange={setRate} />
+      {/* PROGRESS BAR */}
+      <View style={s.progressTrack}>
+        <View style={[s.progressFill, { width: `${pct}%` }]} />
       </View>
 
-      {/* Toolbar */}
-      <View style={[styles.toolbar, { paddingBottom: Math.max(10, insets.bottom) }]}>
-        <TouchableOpacity style={styles.tbBtn} onPress={pickFile} disabled={isExtracting}>
-          <Text style={styles.tbText}>📁</Text>
-          <Text style={styles.tbMini}>File</Text>
-        </TouchableOpacity>
+      {/* CONTENUTO */}
+      <View style={s.readerArea}>
+        {segments.length === 0 && !busy ? (
+          <View style={s.emptyWrap}>
+            <Text style={s.emptyEmoji}>📖</Text>
+            <Text style={s.emptyTitle}>Ascolta i tuoi documenti</Text>
+            <Text style={s.emptyText}>
+              Apri un file PDF, Word, TXT o RTF — oppure condividilo a LeggiMi da un'altra app — e te lo leggo ad alta voce.
+            </Text>
+            <Pressable onPress={pickFile} style={s.primaryBtn} android_ripple={{ color: "#ffffff30" }}>
+              <Text style={s.primaryBtnText}>Apri un documento</Text>
+            </Pressable>
+            <Text style={s.emptyHint}>Suggerimento: in qualsiasi app premi “Condividi” e scegli LeggiMi.</Text>
+          </View>
+        ) : (
+          <FlatList
+            ref={listRef}
+            data={segments}
+            keyExtractor={(_, i) => String(i)}
+            renderItem={renderItem}
+            extraData={`${currentIdx}|${fontSize}|${themeName}`}
+            initialNumToRender={20}
+            maxToRenderPerBatch={20}
+            windowSize={11}
+            removeClippedSubviews
+            contentContainerStyle={s.listContent}
+            showsVerticalScrollIndicator
+            onScrollToIndexFailed={(info) => {
+              listRef.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: false,
+              });
+              setTimeout(() => scrollToIndexSafe(info.index), 220);
+            }}
+          />
+        )}
 
-        <TouchableOpacity
-          style={[styles.tbBtn, (!canRead || isExtracting) && styles.tbDisabled]}
-          onPress={onPlayPress}
-          disabled={!canRead || isExtracting}
-        >
-          <Text style={styles.tbText}>{isReading ? "⏸" : "▶️"}</Text>
-          <Text style={styles.tbMini}>{isReading ? "Pausa" : "Play"}</Text>
-        </TouchableOpacity>
+        {busy && (
+          <View style={s.loadingOverlay}>
+            <ActivityIndicator size="large" color={palette.accent} />
+            <Text style={s.loadingText}>Estrazione del testo…</Text>
+            {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
+          </View>
+        )}
+      </View>
 
-        <TouchableOpacity
-          style={[styles.tbBtn, (!isReading && !isPaused) && styles.tbDisabled]}
-          onPress={hardStop}
-          disabled={!isReading && !isPaused}
-        >
-          <Text style={styles.tbText}>⏹</Text>
-          <Text style={styles.tbMini}>Stop</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tbBtn, segments.length === 0 && styles.tbDisabled]}
+      {/* TRANSPORT BAR */}
+      <View style={[s.transport, { paddingBottom: Math.max(12, insets.bottom) }]}>
+        <Pressable
           onPress={() => skipSegment(-1)}
           disabled={segments.length === 0}
+          style={[s.tBtn, segments.length === 0 && s.tDisabled]}
+          android_ripple={{ color: palette.border, borderless: true }}
         >
-          <Text style={styles.tbText}>⏮</Text>
-          <Text style={styles.tbMini}>Prev</Text>
-        </TouchableOpacity>
+          <Text style={s.tIcon}>⏮</Text>
+          <Text style={s.tLabel}>Prec.</Text>
+        </Pressable>
 
-        <TouchableOpacity
-          style={[styles.tbBtn, segments.length === 0 && styles.tbDisabled]}
-          onPress={() => skipSegment(+1)}
-          disabled={segments.length === 0}
+        <Pressable
+          onPress={onPlayPress}
+          disabled={!canRead || busy}
+          style={[s.playBtn, (!canRead || busy) && s.tDisabled]}
+          android_ripple={{ color: "#ffffff40", borderless: true }}
         >
-          <Text style={styles.tbText}>⏭</Text>
-          <Text style={styles.tbMini}>Next</Text>
-        </TouchableOpacity>
+          <Text style={s.playIcon}>{isReading ? "❚❚" : "►"}</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => skipSegment(1)}
+          disabled={segments.length === 0}
+          style={[s.tBtn, segments.length === 0 && s.tDisabled]}
+          android_ripple={{ color: palette.border, borderless: true }}
+        >
+          <Text style={s.tIcon}>⏭</Text>
+          <Text style={s.tLabel}>Succ.</Text>
+        </Pressable>
+
+        <Pressable onPress={cycleSpeed} style={s.speedPill} android_ripple={{ color: palette.border }}>
+          <Text style={s.speedText}>{rate.toFixed(2)}×</Text>
+          <Text style={s.tLabel}>Velocità</Text>
+        </Pressable>
       </View>
 
-      {/* PDF WebView extractor offline */}
+      {/* SHEET IMPOSTAZIONI */}
+      <Modal visible={settingsOpen} transparent animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
+        <Pressable style={s.backdrop} onPress={() => setSettingsOpen(false)} />
+        <View style={s.sheet}>
+          <View style={s.sheetHandle} />
+          <Text style={s.sheetTitle}>Impostazioni lettura</Text>
+
+          <Text style={s.sheetLabel}>Tema</Text>
+          <View style={s.segmented}>
+            {(["dark", "light", "sepia"] as ThemeName[]).map((t) => (
+              <Pressable
+                key={t}
+                onPress={() => setThemeName(t)}
+                style={[s.segItem, themeName === t && s.segItemActive]}
+              >
+                <Text style={[s.segText, themeName === t && s.segTextActive]}>
+                  {t === "dark" ? "Scuro" : t === "light" ? "Chiaro" : "Seppia"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <Text style={s.sheetLabel}>Dimensione testo</Text>
+          <View style={s.fontRow}>
+            <Pressable
+              onPress={() => setFontIndex((i) => Math.max(0, i - 1))}
+              disabled={fontIndex <= 0}
+              style={[s.fontBtn, fontIndex <= 0 && s.tDisabled]}
+            >
+              <Text style={s.fontBtnText}>A−</Text>
+            </Pressable>
+            <Text style={s.fontPreview}>{fontSize}px</Text>
+            <Pressable
+              onPress={() => setFontIndex((i) => Math.min(FONT_SIZES.length - 1, i + 1))}
+              disabled={fontIndex >= FONT_SIZES.length - 1}
+              style={[s.fontBtn, fontIndex >= FONT_SIZES.length - 1 && s.tDisabled]}
+            >
+              <Text style={s.fontBtnText}>A+</Text>
+            </Pressable>
+          </View>
+
+          <Text style={s.sheetLabel}>Velocità voce: {rate.toFixed(2)}×</Text>
+          <Slider
+            minimumValue={0.5}
+            maximumValue={2.0}
+            step={0.05}
+            value={rate}
+            onValueChange={setRate}
+            minimumTrackTintColor={palette.accent}
+            maximumTrackTintColor={palette.border}
+            thumbTintColor={palette.accent}
+          />
+
+          <Pressable onPress={() => setSettingsOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
+            <Text style={s.sheetCloseText}>Fatto</Text>
+          </Pressable>
+        </View>
+      </Modal>
+
+      {/* SHEET CAPITOLI */}
+      <Modal visible={chaptersOpen} transparent animationType="slide" onRequestClose={() => setChaptersOpen(false)}>
+        <Pressable style={s.backdrop} onPress={() => setChaptersOpen(false)} />
+        <View style={[s.sheet, { maxHeight: "70%" }]}>
+          <View style={s.sheetHandle} />
+          <Text style={s.sheetTitle}>Indice</Text>
+          <ScrollView style={{ marginTop: 4 }}>
+            {chapters.map((ch, idx) => {
+              const active = idx === currentChapterIdx;
+              return (
+                <Pressable
+                  key={idx}
+                  onPress={() => skipToChapter(ch)}
+                  style={[s.chapterRow, active && { backgroundColor: palette.surface2 }]}
+                  android_ripple={{ color: palette.border }}
+                >
+                  <Text style={[s.chapterText, active && { color: palette.accent, fontWeight: "700" }]} numberOfLines={2}>
+                    {ch.title}
+                  </Text>
+                  <Text style={s.chapterMeta}>{ch.startIndex + 1}–{ch.endIndex + 1}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          <Pressable onPress={() => setChaptersOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
+            <Text style={s.sheetCloseText}>Chiudi</Text>
+          </Pressable>
+        </View>
+      </Modal>
+
+      {/* PDF extractor offline (nascosto) */}
       {pdfBase64 && (
         <WebView
           source={{ html: pdfJsHtmlOffline(pdfBase64), baseUrl: "file:///android_asset/" }}
           javaScriptEnabled
           originWhitelist={["*"]}
-		allowFileAccess={true}
-		allowFileAccessFromFileURLs={true}
-		allowUniversalAccessFromFileURLs={true}
-		  mixedContentMode="always"
+          allowFileAccess
+          allowFileAccessFromFileURLs
+          allowUniversalAccessFromFileURLs
+          mixedContentMode="always"
           onMessage={async (e) => {
             try {
               const msg = JSON.parse(e.nativeEvent.data);
-
               if (msg.ok) {
                 const t = String(msg.text || "").trim();
                 if (!t) {
@@ -816,7 +1109,6 @@ const openFileFromUri = async (
                 const start = await applyTextForCurrentFile(fileId, t);
                 setIsExtracting(false);
                 setPdfBase64(null);
-
                 if (pendingAutoStartRef.current) {
                   pendingAutoStartRef.current = false;
                   setTimeout(() => speakFrom(start), 250);
@@ -838,7 +1130,7 @@ const openFileFromUri = async (
             setPdfBase64(null);
             pendingAutoStartRef.current = false;
           }}
-          style={{ width: 0, height: 0, opacity: 0 }}
+          style={{ width: 0, height: 0, opacity: 0, position: "absolute" }}
         />
       )}
     </View>
@@ -853,32 +1145,107 @@ export default function App() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b0b0b" },
+function makeStyles(p: Palette) {
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: p.bg },
 
-  chapterPanel: { backgroundColor: "#151515", borderRadius: 12, marginHorizontal: 16, marginTop: 8, marginBottom: 10, padding: 12 },
-  chapterList: { maxHeight: 240 },
-  chapterRow: { paddingVertical: 10, borderTopWidth: 1, borderTopColor: "#222" },
-  chapterText: { color: "white" },
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 8,
+      height: 52,
+    },
+    headerBtn: { width: 44, height: 44, alignItems: "center", justifyContent: "center", borderRadius: 22 },
+    headerIcon: { fontSize: 20, color: p.text },
+    headerAa: { fontSize: 17, fontWeight: "800", color: p.text },
+    headerTitleWrap: { flex: 1, paddingHorizontal: 6 },
+    headerTitle: { color: p.text, fontSize: 15, fontWeight: "700" },
+    headerSub: { color: p.dim, fontSize: 11, marginTop: 1 },
 
-  textBox: { flex: 1, marginHorizontal: 16, backgroundColor: "#111", borderRadius: 12, padding: 12 },
-  text: { color: "white", lineHeight: 20 },
-  normalSeg: { backgroundColor: "transparent" },
-  karaoke: { backgroundColor: "#ffe86a", color: "#000", borderRadius: 6, padding: 8 },
+    progressTrack: { height: 3, backgroundColor: p.border },
+    progressFill: { height: 3, backgroundColor: p.accent },
 
-  rateBox: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 8 },
-  rateLabel: { color: "#8f8f8f", fontSize: 12, marginBottom: 6 },
+    readerArea: { flex: 1 },
+    listContent: { paddingVertical: 10, paddingBottom: 28 },
 
-  toolbar: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    paddingTop: 10,
-    backgroundColor: "#121212",
-    borderTopWidth: 1,
-    borderTopColor: "#222",
-  },
-  tbBtn: { alignItems: "center", paddingHorizontal: 8, paddingVertical: 4, minWidth: 56 },
-  tbText: { color: "white", fontSize: 18, fontWeight: "900" },
-  tbMini: { color: "#bdbdbd", fontSize: 10, marginTop: 2 },
-  tbDisabled: { opacity: 0.35 },
-});
+    emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 },
+    emptyEmoji: { fontSize: 52, marginBottom: 14 },
+    emptyTitle: { color: p.text, fontSize: 22, fontWeight: "800", marginBottom: 10, textAlign: "center" },
+    emptyText: { color: p.dim, fontSize: 15, lineHeight: 22, textAlign: "center", marginBottom: 22 },
+    primaryBtn: { backgroundColor: p.accent, paddingHorizontal: 26, paddingVertical: 14, borderRadius: 28 },
+    primaryBtnText: { color: p.onAccent, fontSize: 16, fontWeight: "700" },
+    emptyHint: { color: p.dim, fontSize: 12.5, textAlign: "center", marginTop: 18, lineHeight: 18 },
+
+    loadingOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: p.bg + "E6",
+    },
+    loadingText: { color: p.text, fontSize: 15, fontWeight: "600", marginTop: 14 },
+    loadingSub: { color: p.dim, fontSize: 12.5, marginTop: 6, maxWidth: "80%" },
+
+    transport: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-around",
+      paddingTop: 10,
+      backgroundColor: p.surface,
+      borderTopWidth: 1,
+      borderTopColor: p.border,
+    },
+    tBtn: { alignItems: "center", justifyContent: "center", minWidth: 56, paddingVertical: 4 },
+    tIcon: { color: p.text, fontSize: 22 },
+    tLabel: { color: p.dim, fontSize: 10.5, marginTop: 3 },
+    tDisabled: { opacity: 0.32 },
+
+    playBtn: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      backgroundColor: p.accent,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: -6,
+    },
+    playIcon: { color: p.onAccent, fontSize: 24, fontWeight: "900" },
+
+    speedPill: { alignItems: "center", justifyContent: "center", minWidth: 56, paddingVertical: 4 },
+    speedText: { color: p.text, fontSize: 16, fontWeight: "800" },
+
+    backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#00000080" },
+    sheet: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: p.surface,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      paddingHorizontal: 20,
+      paddingTop: 8,
+      paddingBottom: 30,
+    },
+    sheetHandle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: p.border, marginBottom: 14 },
+    sheetTitle: { color: p.text, fontSize: 18, fontWeight: "800", marginBottom: 16 },
+    sheetLabel: { color: p.dim, fontSize: 13, marginTop: 14, marginBottom: 8, fontWeight: "600" },
+
+    segmented: { flexDirection: "row", backgroundColor: p.surface2, borderRadius: 12, padding: 4 },
+    segItem: { flex: 1, paddingVertical: 10, borderRadius: 9, alignItems: "center" },
+    segItemActive: { backgroundColor: p.accent },
+    segText: { color: p.text, fontWeight: "600", fontSize: 14 },
+    segTextActive: { color: p.onAccent, fontWeight: "800" },
+
+    fontRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+    fontBtn: { backgroundColor: p.surface2, borderRadius: 12, paddingHorizontal: 22, paddingVertical: 12, minWidth: 72, alignItems: "center" },
+    fontBtnText: { color: p.text, fontSize: 18, fontWeight: "800" },
+    fontPreview: { color: p.text, fontSize: 16, fontWeight: "700" },
+
+    sheetClose: { marginTop: 22, backgroundColor: p.accent, borderRadius: 14, paddingVertical: 14, alignItems: "center" },
+    sheetCloseText: { color: p.onAccent, fontSize: 16, fontWeight: "800" },
+
+    chapterRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 14, paddingHorizontal: 12, borderRadius: 10 },
+    chapterText: { color: p.text, fontSize: 15, flex: 1, paddingRight: 10 },
+    chapterMeta: { color: p.dim, fontSize: 12 },
+  });
+}
