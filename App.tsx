@@ -1049,8 +1049,7 @@ function AppInner() {
             extraData={`${currentIdx}|${fontSize}|${themeName}`}
             initialNumToRender={20}
             maxToRenderPerBatch={20}
-            windowSize={11}
-            removeClippedSubviews
+            windowSize={21}
             contentContainerStyle={s.listContent}
             showsVerticalScrollIndicator
             onScrollToIndexFailed={(info) => {
