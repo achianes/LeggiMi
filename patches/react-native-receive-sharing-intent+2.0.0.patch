@@ -1,0 +1,28 @@
+diff --git a/node_modules/react-native-receive-sharing-intent/android/build.gradle b/node_modules/react-native-receive-sharing-intent/android/build.gradle
+index 02cc8f2..08afd8a 100644
+--- a/node_modules/react-native-receive-sharing-intent/android/build.gradle
++++ b/node_modules/react-native-receive-sharing-intent/android/build.gradle
+@@ -2,10 +2,10 @@ buildscript {
+   // Buildscript is evaluated before everything else so we can't use getExtOrDefault
+   def kotlin_version = rootProject.ext.has('kotlinVersion') ? rootProject.ext.get('kotlinVersion') : project.properties['ReceiveSharingIntent_kotlinVersion']
+ 
+-  repositories {
+-    google()
+-    jcenter()
+-  }
++	repositories {
++	  google()
++	  mavenCentral()
++	}
+ 
+   dependencies {
+     classpath 'com.android.tools.build:gradle:3.2.1'
+@@ -52,7 +52,7 @@ android {
+ 
+ repositories {
+   mavenCentral()
+-  jcenter()
++
+   google()
+ 
+   def found = false
