@@ -566,7 +566,7 @@ function AppInner() {
 
     return () => {
       try { subErr?.remove?.(); } catch {}
-      Tts.stop();
+      try { Tts.stop(); } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -579,11 +579,24 @@ function AppInner() {
   }, [rate, ttsReady, settingsLoaded]);
 
   // ====== CONTROLLI TTS ======
+  const safeStop = async () => { try { await Tts.stop(); } catch {} };
+
+  // getInitStatus() si risolve quando il motore e' pronto. All'avvio "a freddo"
+  // (tipico dell'apertura via Condividi) puo' non esserlo ancora: attendiamo.
+  const ensureTtsReady = async (timeoutMs = 10000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try { await Tts.getInitStatus(); return true; }
+      catch { await new Promise((r) => setTimeout(r, 300)); }
+    }
+    return false;
+  };
+
   const hardStop = async () => {
     stopRef.current = true;
     sessionRef.current += 1;
     setIsPaused(false);
-    await Tts.stop();
+    await safeStop();
     setIsReading(false);
   };
 
@@ -591,7 +604,7 @@ function AppInner() {
     if (!isReading) return;
     stopRef.current = true;
     sessionRef.current += 1;
-    await Tts.stop();
+    await safeStop();
     setIsReading(false);
     setIsPaused(true);
   };
@@ -646,10 +659,22 @@ function AppInner() {
     ttsErrorShownRef.current = false;
     const sessionToken = (sessionRef.current += 1);
 
-    try { await Tts.getInitStatus(); } catch {}
+    const ready = await ensureTtsReady();
+    if (sessionRef.current !== sessionToken) return;
+    if (!ready) {
+      if (!ttsErrorShownRef.current) {
+        ttsErrorShownRef.current = true;
+        Alert.alert(
+          "Sintesi vocale",
+          "Il motore vocale del telefono non è ancora pronto. Attendi qualche secondo e riprova; se persiste, apri Impostazioni Android › Lingua e immissione › Sintesi vocale e verifica che sia installata una voce italiana."
+        );
+      }
+      setIsReading(false);
+      return;
+    }
     try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
     try { await Tts.setDefaultLanguage("it-IT"); } catch {}
-    await Tts.stop();
+    await safeStop();
 
     setIsReading(true);
     setIsPaused(false);
