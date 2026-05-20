@@ -27,10 +27,12 @@ import ReceiveSharingIntent from "react-native-receive-sharing-intent";
 type Picked = { name: string; uri: string; type?: string | null };
 type Chapter = { title: string; startIndex: number; endIndex: number };
 type ThemeName = "dark" | "light" | "sepia";
+type Voice = { id: string; name?: string; language?: string; quality?: number; latency?: number; networkConnectionRequired?: boolean; notInstalled?: boolean };
 
 const SETTINGS_RATE_KEY = "settings:ttsRate";
 const SETTINGS_THEME_KEY = "settings:theme";
 const SETTINGS_FONT_KEY = "settings:fontIndex";
+const SETTINGS_VOICE_KEY = "settings:ttsVoice";
 
 const FONT_SIZES = [15, 17, 19, 21, 24, 27, 31];
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -386,6 +388,15 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
 `;
 };
 
+// Gli id voce dei motori sono criptici (es. "it-it-x-kda-local"): ne ricaviamo
+// un'etichetta leggibile e stabile.
+function voiceLabel(v: Voice, index: number) {
+  const raw = String(v.name || v.id || "");
+  const m = raw.match(/x-([a-z0-9]+)/i);
+  const code = m ? m[1].toUpperCase() : raw.replace(/^it[-_]it[-_]?/i, "").replace(/-(local|network)$/i, "").toUpperCase();
+  return code && code.length >= 2 ? `Voce ${code}` : `Voce ${index + 1}`;
+}
+
 type RowProps = {
   text: string;
   index: number;
@@ -458,6 +469,9 @@ function AppInner() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chaptersOpen, setChaptersOpen] = useState(false);
+  const [voicesOpen, setVoicesOpen] = useState(false);
+  const [voices, setVoices] = useState<Voice[]>([]);
+  const [voiceId, setVoiceId] = useState<string | null>(null);
 
   const stopRef = useRef(false);
   const [ttsReady, setTtsReady] = useState(false);
@@ -472,6 +486,8 @@ function AppInner() {
   useEffect(() => { fileIdRef.current = fileId; }, [fileId]);
   const rateRef = useRef(rate);
   useEffect(() => { rateRef.current = rate; }, [rate]);
+  const voiceIdRef = useRef<string | null>(null);
+  useEffect(() => { voiceIdRef.current = voiceId; }, [voiceId]);
 
   const listRef = useRef<FlatList<string> | null>(null);
   const processingShareRef = useRef(false);
@@ -494,6 +510,12 @@ function AppInner() {
     return -1;
   }, [chapters, currentIdx]);
 
+  const currentVoiceLabel = useMemo(() => {
+    if (!voiceId) return "Predefinita di sistema";
+    const i = voices.findIndex((v) => v.id === voiceId);
+    return i >= 0 ? voiceLabel(voices[i], i) : "Voce selezionata";
+  }, [voiceId, voices]);
+
   // ====== AUTOSCROLL: tieni la frase in lettura in vista ======
   const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32) => {
     const list = listRef.current;
@@ -512,11 +534,13 @@ function AppInner() {
   useEffect(() => {
     (async () => {
       try {
-        const [savedRate, savedTheme, savedFont] = await Promise.all([
+        const [savedRate, savedTheme, savedFont, savedVoice] = await Promise.all([
           AsyncStorage.getItem(SETTINGS_RATE_KEY),
           AsyncStorage.getItem(SETTINGS_THEME_KEY),
           AsyncStorage.getItem(SETTINGS_FONT_KEY),
+          AsyncStorage.getItem(SETTINGS_VOICE_KEY),
         ]);
+        if (savedVoice) setVoiceId(savedVoice);
         if (savedRate) { const v = Number(savedRate); if (!Number.isNaN(v)) setRate(v); }
         if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "sepia") {
           setThemeName(savedTheme);
@@ -577,6 +601,35 @@ function AppInner() {
     if (!ttsReady) return;
     Tts.setDefaultRate(rate, true).catch(() => {});
   }, [rate, ttsReady, settingsLoaded]);
+
+  // carica le voci italiane installate quando il motore e' pronto
+  useEffect(() => {
+    if (!ttsReady) return;
+    (async () => {
+      try {
+        const all: Voice[] = await Tts.voices();
+        const it = (all || []).filter(
+          (v) => v && !v.notInstalled && typeof v.language === "string" && v.language.toLowerCase().startsWith("it")
+        );
+        it.sort(
+          (a, b) =>
+            (a.networkConnectionRequired ? 1 : 0) - (b.networkConnectionRequired ? 1 : 0) ||
+            String(a.name || a.id).localeCompare(String(b.name || b.id))
+        );
+        setVoices(it);
+      } catch {}
+    })();
+  }, [ttsReady]);
+
+  // applica la voce scelta e salvala
+  useEffect(() => {
+    if (ttsReady && voiceId) Tts.setDefaultVoice(voiceId).catch(() => {});
+  }, [ttsReady, voiceId]);
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    if (voiceId) AsyncStorage.setItem(SETTINGS_VOICE_KEY, voiceId).catch(() => {});
+    else AsyncStorage.removeItem(SETTINGS_VOICE_KEY).catch(() => {});
+  }, [voiceId, settingsLoaded]);
 
   // ====== CONTROLLI TTS ======
   const safeStop = async () => { try { await Tts.stop(); } catch {} };
@@ -673,7 +726,14 @@ function AppInner() {
       return;
     }
     try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
-    try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+    // una voce specifica porta con se' la sua lingua; impostare la lingua
+    // dopo la voce la sovrascriverebbe, quindi sono alternative.
+    if (voiceIdRef.current) {
+      try { await Tts.setDefaultVoice(voiceIdRef.current); }
+      catch { try { await Tts.setDefaultLanguage("it-IT"); } catch {} }
+    } else {
+      try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+    }
     await safeStop();
 
     setIsReading(true);
@@ -741,6 +801,33 @@ function AppInner() {
   };
 
   const goToCurrent = () => scrollToIndexSafe(currentIdx, 0.32);
+
+  // sceglie una voce, la salva e ne riproduce un'anteprima
+  const onSelectVoice = async (id: string | null) => {
+    setVoiceId(id);
+    voiceIdRef.current = id;
+    await hardStop();
+    const ready = await ensureTtsReady(4000);
+    if (!ready) return;
+    try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
+    if (id) {
+      try { await Tts.setDefaultVoice(id); } catch { try { await Tts.setDefaultLanguage("it-IT"); } catch {} }
+    } else {
+      try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+    }
+    try { await Tts.speak("Ciao, questa è la voce selezionata."); } catch {}
+  };
+
+  const openInstallVoices = async () => {
+    setVoicesOpen(false);
+    try { await Tts.requestInstallData(); }
+    catch {
+      Alert.alert(
+        "Voci",
+        "Apri Impostazioni Android › Sistema › Lingue e immissione › Sintesi vocale per gestire o installare altre voci."
+      );
+    }
+  };
 
   // ====== APPLY TEXT ======
   const applyTextForCurrentFile = async (fid: string, text: string) => {
@@ -1075,6 +1162,16 @@ function AppInner() {
             thumbTintColor={palette.accent}
           />
 
+          <Text style={s.sheetLabel}>Voce</Text>
+          <Pressable
+            onPress={() => { setSettingsOpen(false); setVoicesOpen(true); }}
+            style={s.rowSelect}
+            android_ripple={{ color: palette.border }}
+          >
+            <Text style={s.rowSelectText} numberOfLines={1}>{currentVoiceLabel}</Text>
+            <Text style={s.rowSelectChevron}>›</Text>
+          </Pressable>
+
           <Pressable onPress={() => setSettingsOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
             <Text style={s.sheetCloseText}>Fatto</Text>
           </Pressable>
@@ -1106,6 +1203,58 @@ function AppInner() {
             })}
           </ScrollView>
           <Pressable onPress={() => setChaptersOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
+            <Text style={s.sheetCloseText}>Chiudi</Text>
+          </Pressable>
+        </View>
+      </Modal>
+
+      {/* SHEET VOCE */}
+      <Modal visible={voicesOpen} transparent animationType="slide" onRequestClose={() => setVoicesOpen(false)}>
+        <Pressable style={s.backdrop} onPress={() => setVoicesOpen(false)} />
+        <View style={[s.sheet, { maxHeight: "75%" }]}>
+          <View style={s.sheetHandle} />
+          <Text style={s.sheetTitle}>Voce italiana</Text>
+          <Text style={s.voiceHint}>Tocca una voce per ascoltarne un'anteprima. La scelta viene salvata automaticamente.</Text>
+          <ScrollView style={{ marginTop: 6 }}>
+            <Pressable
+              onPress={() => onSelectVoice(null)}
+              style={[s.chapterRow, !voiceId && { backgroundColor: palette.surface2 }]}
+              android_ripple={{ color: palette.border }}
+            >
+              <Text style={[s.chapterText, !voiceId && { color: palette.accent, fontWeight: "700" }]}>Predefinita di sistema</Text>
+              {!voiceId ? <Text style={s.voiceCheck}>✓</Text> : null}
+            </Pressable>
+            {voices.map((v, idx) => {
+              const active = v.id === voiceId;
+              return (
+                <Pressable
+                  key={v.id}
+                  onPress={() => onSelectVoice(v.id)}
+                  style={[s.chapterRow, active && { backgroundColor: palette.surface2 }]}
+                  android_ripple={{ color: palette.border }}
+                >
+                  <View style={{ flex: 1, paddingRight: 10 }}>
+                    <Text style={[s.chapterText, active && { color: palette.accent, fontWeight: "700" }]} numberOfLines={1}>
+                      {voiceLabel(v, idx)}
+                    </Text>
+                    {v.networkConnectionRequired ? <Text style={s.voiceMeta}>richiede connessione</Text> : null}
+                  </View>
+                  {active ? <Text style={s.voiceCheck}>✓</Text> : null}
+                </Pressable>
+              );
+            })}
+            {voices.length === 0 ? (
+              <Text style={s.voiceHint}>Nessuna voce italiana trovata sul telefono: installane una qui sotto.</Text>
+            ) : null}
+            <Pressable
+              onPress={openInstallVoices}
+              style={[s.chapterRow, { borderTopWidth: 1, borderTopColor: palette.border, marginTop: 6 }]}
+              android_ripple={{ color: palette.border }}
+            >
+              <Text style={[s.chapterText, { color: palette.accent }]}>+ Installa altre voci…</Text>
+            </Pressable>
+          </ScrollView>
+          <Pressable onPress={() => setVoicesOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
             <Text style={s.sheetCloseText}>Chiudi</Text>
           </Pressable>
         </View>
@@ -1272,5 +1421,12 @@ function makeStyles(p: Palette) {
     chapterRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 14, paddingHorizontal: 12, borderRadius: 10 },
     chapterText: { color: p.text, fontSize: 15, flex: 1, paddingRight: 10 },
     chapterMeta: { color: p.dim, fontSize: 12 },
+
+    rowSelect: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: p.surface2, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14 },
+    rowSelectText: { color: p.text, fontSize: 15, fontWeight: "600", flex: 1, paddingRight: 10 },
+    rowSelectChevron: { color: p.dim, fontSize: 22, marginTop: -2 },
+    voiceHint: { color: p.dim, fontSize: 12.5, lineHeight: 18, marginTop: 4 },
+    voiceMeta: { color: p.dim, fontSize: 11.5, marginTop: 2 },
+    voiceCheck: { color: p.accent, fontSize: 18, fontWeight: "800" },
   });
 }
