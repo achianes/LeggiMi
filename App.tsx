@@ -185,9 +185,13 @@ function postCleanExtractedText(raw: string) {
   for (const l of lines) {
     const low = l.toLowerCase();
     if (!l) { cleanedLines.push(""); continue; }
-    if (/^\d{1,4}(\s*\/\s*\d{1,4})?$/.test(l)) continue; // numeri pagina
-    if (/^(https?:\/\/|www\.)\S+$/i.test(l)) continue; // url isolate
+    if (/^\d{1,4}(\s*\/\s*\d{1,4})?$/.test(l)) continue; // page numbers
+    if (/^(pag(ina|e)?|page|p)\.?\s*\d{1,4}(\s*(di|of|\/)\s*\d{1,4})?$/i.test(l)) continue; // "Pagina 3 di 10"
+    if (/^(https?:\/\/|www\.)\S+$/i.test(l)) continue; // isolated urls
     if (l.length <= 1) continue;
+    // table-of-contents rows: "Chapter 2 ........ 83" / "TITLE ..14" / "1.2 Title · · · · 15"
+    if (/\S\s*(\.\s?){2,}\s*\d{1,4}\s*$/.test(l) || /(·\s?){3,}\s*\d{1,4}\s*$/.test(l)) continue;
+    if (/(\.\s?){6,}/.test(l) && l.replace(/[.\s\d]/g, "").length < 40) continue;
 
     const c = counts.get(low) ?? 0;
     if (c >= 3 && low.length >= 12 && low.length <= 80) continue; // header/footer ripetuti
@@ -196,7 +200,37 @@ function postCleanExtractedText(raw: string) {
     cleanedLines.push(l);
   }
 
-  let out = cleanedLines.join("\n");
+  // Unwrap lines broken by the page layout: a line that does not end a
+  // sentence, or a line starting in lowercase (even after a page break),
+  // continues the previous one. Headings, list items and dialogue dashes
+  // keep their own line.
+  const TERMINAL = /[.!?…:;"”»)\]]\s*$/;
+  const OWN_LINE = /^(#{1,6}\s|[-*•]\s|\d{1,3}[.)]\s|[—–-]\s|["“«])/;
+  const merged: string[] = [];
+  for (const l of cleanedLines) {
+    if (!l) { merged.push(""); continue; }
+    let j = merged.length - 1;
+    let blanks = 0;
+    while (j >= 0 && merged[j] === "") { j--; blanks++; }
+    if (j >= 0) {
+      const prev = merged[j];
+      const startsLower = /^[a-zà-öø-ÿ]/.test(l);
+      const prevOpen = !TERMINAL.test(prev);
+      const canJoin =
+        !OWN_LINE.test(l) &&
+        !isChapterHeading(prev) &&
+        !isChapterHeading(l) &&
+        (startsLower || (prevOpen && blanks === 0));
+      if (canJoin) {
+        merged.length = j + 1;
+        merged[j] = prev + " " + l;
+        continue;
+      }
+    }
+    merged.push(l);
+  }
+
+  let out = merged.join("\n");
   out = out.replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
   return out;
 }
@@ -322,7 +356,9 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
         continue;
       }
       if (!acc) acc = s;
-      else if (acc.length < minMerge) acc += " " + s; // unisci frasi troppo corte
+      // keep very short sentences ("Questions?", "Ask Sam.") attached to a
+      // neighbour instead of making a one-word block
+      else if (acc.length < minMerge || (s.length < 30 && acc.length + s.length + 1 <= maxChars)) acc += " " + s;
       else { flush(); acc = s; }
     }
     flush();
@@ -334,8 +370,10 @@ function isChapterHeading(line: string) {
   const s = (line || "").trim();
   if (s.length < 3) return false;
   if (/^#{1,6}\s+/.test(s)) return true;
-  if (/^(capitolo|parte|sezione|articolo|chapter|section)\s+([0-9]+|[ivxlcdm]+)/i.test(s)) return true;
-  if (/^(\d+(\.\d+)*|[IVXLCDM]+)\.\s+/.test(s)) return true;
+  // "Capitolo 3", "Parte II", "Chapter 12 – Title": roman numerals must be
+  // uppercase, otherwise "parte di un vetro" would look like "Parte DI".
+  if (s.length <= 80 && /^([Cc]apitolo|[Pp]arte|[Ss]ezione|[Aa]rticolo|[Cc]hapter|[Ss]ection|[Pp]art|CAPITOLO|PARTE|SEZIONE|ARTICOLO|CHAPTER|SECTION|PART)\s+(\d{1,4}|[IVXLCDM]{1,7})(?=$|[\s.:;,–—-])/.test(s)) return true;
+  if (s.length <= 80 && /^(\d+(\.\d+)*|[IVXLCDM]+)\.\s+\S/.test(s)) return true;
 
   const letters = s.replace(/[^A-Za-zÀ-ÿ]/g, "");
   const upper = letters.replace(/[^A-ZÀ-Ý]/g, "");
@@ -418,12 +456,44 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
       disableWorker: true,
     }).promise;
 
+    // Rebuild lines and paragraphs from glyph positions: pdf.js gives text
+    // runs with a transform (x, y); a vertical jump means a new line, a
+    // bigger jump means a paragraph break. Joining everything with spaces
+    // (the naive way) loses headings, lists and tables of contents.
     let full = "";
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
       const content = await page.getTextContent();
-      const strings = content.items.map(it => it.str || "").filter(Boolean);
-      full += strings.join(" ") + "\\n\\n";
+      const lines = [];
+      let cur = "";
+      let lastY = null, lastH = 10, lastX2 = null;
+      for (const it of content.items) {
+        const str = it.str || "";
+        if (!str && !it.hasEOL) continue;
+        const tr = it.transform || [1, 0, 0, 1, 0, 0];
+        const x = tr[4], y = tr[5];
+        const h = Math.max(4, Math.abs(tr[3]) || it.height || lastH);
+        if (lastY !== null) {
+          const dy = Math.abs(y - lastY);
+          if (dy > h * 0.55) {
+            lines.push(cur.trim());
+            cur = "";
+            if (dy > h * 1.9) lines.push("");
+          } else if (lastX2 !== null && x - lastX2 > h * 0.18 && cur && !cur.endsWith(" ") && !str.startsWith(" ")) {
+            cur += " ";
+          }
+        }
+        cur += str;
+        if (it.hasEOL && !str.endsWith("-")) {
+          lines.push(cur.trim());
+          cur = "";
+          lastY = null; lastX2 = null;
+          continue;
+        }
+        lastY = y; lastH = h; lastX2 = x + (it.width || 0);
+      }
+      if (cur.trim()) lines.push(cur.trim());
+      full += lines.join("\\n") + "\\n\\n";
     }
 
     window.ReactNativeWebView.postMessage(
@@ -1289,12 +1359,11 @@ function AppInner() {
 
     let localPath = "";
     const ext = extOf(name);
-    console.log("[open]", JSON.stringify({ name, uri: uri.slice(0, 120), mime, ext, fromShare, autoStart }));
+    console.log("[open]", name, mime || ext, fromShare ? "share" : "picker");
 
     try {
       if (fromShare) {
         localPath = await copySharedUriToCache(uri, name);
-        console.log("[open] copied to", localPath);
       } else {
         const copied = await keepLocalCopy({
           destination: "cachesDirectory",
@@ -1333,7 +1402,6 @@ function AppInner() {
 
       if (ext === "pdf" || mime === "application/pdf") {
         const b64 = await RNFS.readFile(localPath, "base64");
-        console.log("[open] pdf base64 length", b64.length);
         pendingAutoStartRef.current = autoStart;
         setPdfBase64(b64);
         return; // isExtracting resta true finché la WebView risponde
@@ -1412,7 +1480,6 @@ function AppInner() {
     let cancelled = false;
 
     const handleFiles = async (files: any[]) => {
-        console.log("[share] files", JSON.stringify(files).slice(0, 600));
         if (!files || files.length === 0) return;
         if (processingShareRef.current) return;
         processingShareRef.current = true;
@@ -1448,7 +1515,6 @@ function AppInner() {
 
     const poll = (reason: string) => {
       if (cancelled) return;
-      console.log("[share] poll", reason, "native=", !!native, "fn=", typeof native?.getFileNames);
       if (!native?.getFileNames) {
         console.log("[share] native module missing");
         return;
@@ -1457,7 +1523,6 @@ function AppInner() {
         .getFileNames()
         .then((obj: any) => {
           const files = obj ? Object.keys(obj).map((k) => obj[k]) : [];
-          if (files.length) console.log("[share] got files on", reason);
           handleFiles(files);
         })
         .catch((e: any) => {
@@ -1821,7 +1886,6 @@ function AppInner() {
           onMessage={async (e) => {
             try {
               const msg = JSON.parse(e.nativeEvent.data);
-              console.log("[pdf] message ok=", msg.ok, "len=", String(msg.text || "").length, msg.error || "");
               if (msg.ok) {
                 const t = String(msg.text || "").trim();
                 if (!t) {
