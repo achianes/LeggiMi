@@ -11,6 +11,11 @@ import {
   StatusBar,
   ScrollView,
   useColorScheme,
+  NativeModules,
+  AppState,
+  StyleProp,
+  ViewStyle,
+  TextStyle,
 } from "react-native";
 
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -22,7 +27,6 @@ import JSZip from "jszip";
 import { WebView } from "react-native-webview";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Slider from "@react-native-community/slider";
-import ReceiveSharingIntent from "react-native-receive-sharing-intent";
 
 type Picked = { name: string; uri: string; type?: string | null };
 type Chapter = { title: string; startIndex: number; endIndex: number };
@@ -37,63 +41,74 @@ const SETTINGS_VOICE_KEY = "settings:ttsVoice";
 const FONT_SIZES = [15, 17, 19, 21, 24, 27, 31];
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
+// ---- the comic palette (shared with Pay & Plan) ---------------------------
+const INK = "#17161A";
+const CREAM = "#FFF6E5";
+const PAPER = "#FFFDF7";
+const YELLOW = "#FFD93D";
+const CORAL = "#FF6B6B";
+const MINT = "#6BCB77";
+const SKY = "#4D96FF";
+const GRAPE = "#B983FF";
+const TANGERINE = "#FF9F45";
+const AQUA = "#4ECDC4";
+const BUBBLEGUM = "#FF9CEE";
+
+// Font files live in android/app/src/main/assets/fonts; on Android the family
+// name is the file name without extension.
+const FONT_POSTER = "LuckiestGuy-Regular";
+const FONT_BODY = "ComicNeue-Regular";
+const FONT_BOLD = "ComicNeue-Bold";
+
 type Palette = {
   bg: string;
   surface: string;
   surface2: string;
   text: string;
   dim: string;
-  border: string;
-  accent: string;
-  onAccent: string;
+  ink: string; // outline colour
+  shadow: string; // hard offset shadow colour
   hlBg: string;
   hlText: string;
-  hlBar: string;
   statusBar: "light-content" | "dark-content";
 };
 
 const THEMES: Record<ThemeName, Palette> = {
-  dark: {
-    bg: "#0B0B0C",
-    surface: "#161618",
-    surface2: "#212124",
-    text: "#ECECEC",
-    dim: "#9A9AA0",
-    border: "#2A2A2E",
-    accent: "#3B82F6",
-    onAccent: "#FFFFFF",
-    hlBg: "#16314F",
-    hlText: "#FFFFFF",
-    hlBar: "#3B82F6",
-    statusBar: "light-content",
-  },
   light: {
-    bg: "#FBFBFC",
-    surface: "#FFFFFF",
-    surface2: "#F1F2F4",
-    text: "#16181C",
-    dim: "#6B7280",
-    border: "#E4E4E7",
-    accent: "#2563EB",
-    onAccent: "#FFFFFF",
-    hlBg: "#DCEAFE",
-    hlText: "#0B1220",
-    hlBar: "#2563EB",
+    bg: CREAM,
+    surface: PAPER,
+    surface2: "#FFEFCB",
+    text: INK,
+    dim: "#6F6862",
+    ink: INK,
+    shadow: INK,
+    hlBg: YELLOW,
+    hlText: INK,
     statusBar: "dark-content",
   },
   sepia: {
-    bg: "#F3EAD6",
-    surface: "#EEE3C9",
-    surface2: "#E6DABA",
-    text: "#3A2F1C",
-    dim: "#8A7A55",
-    border: "#DDCDA3",
-    accent: "#B0712A",
-    onAccent: "#FFFFFF",
-    hlBg: "#E7D6A6",
-    hlText: "#2A2110",
-    hlBar: "#B0712A",
+    bg: "#F1E2C4",
+    surface: "#FBF2DE",
+    surface2: "#EBD9B3",
+    text: "#2B2216",
+    dim: "#7D6B4C",
+    ink: "#2B2216",
+    shadow: "#2B2216",
+    hlBg: "#FFD06B",
+    hlText: "#2B2216",
     statusBar: "dark-content",
+  },
+  dark: {
+    bg: "#1E1C22",
+    surface: "#2C2A32",
+    surface2: "#3A3741",
+    text: CREAM,
+    dim: "#B8B1A5",
+    ink: CREAM,
+    shadow: "#08070A",
+    hlBg: YELLOW,
+    hlText: INK,
+    statusBar: "light-content",
   },
 };
 
@@ -191,7 +206,7 @@ async function extractDocxText(localPath: string) {
   const zip = await JSZip.loadAsync(b64, { base64: true });
 
   const docXmlFile = zip.file("word/document.xml");
-  if (!docXmlFile) throw new Error("DOCX non valido: manca word/document.xml");
+  if (!docXmlFile) throw new Error("Invalid DOCX: word/document.xml is missing");
 
   const xml = await docXmlFile.async("text");
   let text = xmlToText(xml);
@@ -204,7 +219,7 @@ async function extractDocxText(localPath: string) {
   }
 
   text = postCleanExtractedText(text);
-  if (!text) throw new Error("Non ho trovato testo nel DOCX.");
+  if (!text) throw new Error("No text found in this DOCX.");
   return text;
 }
 
@@ -235,21 +250,56 @@ function splitSentences(paragraph: string): string[] {
   return parts.map((s) => s.trim()).filter(Boolean);
 }
 
-function segmentIntoSentences(raw: string, maxChars = 280, minMerge = 45): string[] {
+/**
+ * Split a block into Markdown-aware chunks: every heading line and every list
+ * item becomes its own chunk, consecutive plain lines stay together.
+ */
+function splitMdBlock(block: string): string[] {
+  const lines = block.split("\n");
+  const out: string[] = [];
+  let acc: string[] = [];
+  const flush = () => { if (acc.length) { out.push(acc.join("\n")); acc = []; } };
+  for (const line of lines) {
+    if (!line.trim()) { flush(); continue; }
+    if (isMdHeadingLine(line) || isMdListLine(line) || /^\s*([-*_]\s*){3,}$/.test(line)) {
+      flush();
+      out.push(line.trim());
+    } else if (/^\s*>/.test(line)) {
+      // quote lines stick together
+      if (acc.length && !/^\s*>/.test(acc[acc.length - 1])) flush();
+      acc.push(line.trim());
+    } else {
+      if (acc.length && /^\s*>/.test(acc[acc.length - 1])) flush();
+      acc.push(line.trim());
+    }
+  }
+  flush();
+  return out;
+}
+
+function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, maxChars = 280, minMerge = 45): string[] {
   const t = normalizeText(raw);
   if (!t) return [];
+  const markdown = !!opts.markdown;
 
   let blocks = t.split(/\n\s*\n+/g).map((x) => x.trim()).filter(Boolean);
   if (blocks.length <= 1) {
     const lines = t.split("\n").map((x) => x.trim()).filter(Boolean);
     if (lines.length >= 8) blocks = lines;
   }
+  blocks = blocks.flatMap(splitMdBlock);
 
   const out: string[] = [];
   for (const block of blocks) {
     const firstLine = block.split("\n")[0] ?? block;
-    if (isChapterHeading(firstLine) && block.length <= 90) {
+    if (isMdHeadingLine(firstLine) || isMdListLine(firstLine) || /^([-*_]\s*){3,}$/.test(block)) {
       out.push(block);
+      continue;
+    }
+    // Plain sources (PDF, DOCX, TXT): promote detected titles to Markdown headings
+    // so the reader shows them as such. In Markdown files only "#" counts.
+    if (!markdown && isChapterHeading(firstLine) && block.length <= 90 && !block.includes("\n")) {
+      out.push(`## ${block}`);
       continue;
     }
 
@@ -293,13 +343,15 @@ function isChapterHeading(line: string) {
   return false;
 }
 function cleanHeadingTitle(s: string) {
-  return s.replace(/^#{1,6}\s+/, "").trim();
+  return mdToPlain(s.replace(/^#{1,6}\s+/, "")).trim();
 }
 function buildChapters(segs: string[], groupSize = 40): Chapter[] {
   const heads: { idx: number; title: string }[] = [];
   segs.forEach((seg, i) => {
     const firstLine = seg.split("\n")[0] ?? seg;
-    if (isChapterHeading(firstLine)) heads.push({ idx: i, title: cleanHeadingTitle(firstLine) });
+    // only real headings (#, ##, ###) open a chapter; deeper levels stay inline
+    const m = firstLine.match(/^(#{1,6})\s+/);
+    if (m && m[1].length <= 3) heads.push({ idx: i, title: cleanHeadingTitle(firstLine) });
   });
 
   if (heads.length >= 2) {
@@ -307,18 +359,18 @@ function buildChapters(segs: string[], groupSize = 40): Chapter[] {
     for (let i = 0; i < heads.length; i++) {
       const start = heads[i].idx;
       const end = i < heads.length - 1 ? heads[i + 1].idx - 1 : segs.length - 1;
-      chapters.push({ title: heads[i].title || `Capitolo ${i + 1}`, startIndex: start, endIndex: Math.max(start, end) });
+      chapters.push({ title: heads[i].title || `Chapter ${i + 1}`, startIndex: start, endIndex: Math.max(start, end) });
     }
     return chapters;
   }
 
   if (segs.length <= groupSize) {
-    return [{ title: "Documento", startIndex: 0, endIndex: Math.max(0, segs.length - 1) }];
+    return [{ title: "Document", startIndex: 0, endIndex: Math.max(0, segs.length - 1) }];
   }
 
   const chapters: Chapter[] = [];
   for (let i = 0, part = 1; i < segs.length; i += groupSize, part++) {
-    chapters.push({ title: `Parte ${part}`, startIndex: i, endIndex: Math.min(segs.length - 1, i + groupSize - 1) });
+    chapters.push({ title: `Part ${part}`, startIndex: i, endIndex: Math.min(segs.length - 1, i + groupSize - 1) });
   }
   return chapters;
 }
@@ -388,14 +440,276 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
 `;
 };
 
-// Gli id voce dei motori sono criptici (es. "it-it-x-kda-local"): ne ricaviamo
-// un'etichetta leggibile e stabile.
+// Device locale, e.g. "it-IT": the default language of the speech engine.
+const DEVICE_LANG: string = (() => {
+  try {
+    const raw = String(NativeModules?.I18nManager?.localeIdentifier || "");
+    return raw ? raw.replace("_", "-") : "it-IT";
+  } catch { return "it-IT"; }
+})();
+
+const LANG_NAMES: Record<string, string> = {
+  it: "Italian", en: "English", fr: "French", de: "German", es: "Spanish", pt: "Portuguese",
+  nl: "Dutch", ru: "Russian", pl: "Polish", tr: "Turkish", ja: "Japanese", zh: "Chinese",
+  ko: "Korean", ar: "Arabic", hi: "Hindi", sv: "Swedish", da: "Danish", nb: "Norwegian",
+  fi: "Finnish", el: "Greek", cs: "Czech", hu: "Hungarian", ro: "Romanian", uk: "Ukrainian",
+};
+function langName(code?: string) {
+  const c = String(code || "").toLowerCase();
+  const base = c.split(/[-_]/)[0];
+  const region = c.split(/[-_]/)[1];
+  const name = LANG_NAMES[base] || (base ? base.toUpperCase() : "Unknown");
+  return region && base === "en" ? `${name} (${region.toUpperCase()})` : name;
+}
+
+// Engine voice ids are cryptic (e.g. "it-it-x-kda-local"): derive a readable,
+// stable label such as "Italian · KDA".
 function voiceLabel(v: Voice, index: number) {
   const raw = String(v.name || v.id || "");
   const m = raw.match(/x-([a-z0-9]+)/i);
-  const code = m ? m[1].toUpperCase() : raw.replace(/^it[-_]it[-_]?/i, "").replace(/-(local|network)$/i, "").toUpperCase();
-  return code && code.length >= 2 ? `Voce ${code}` : `Voce ${index + 1}`;
+  const code = m ? m[1].toUpperCase() : raw.replace(/^[a-z]{2,3}[-_][a-z]{2,3}[-_]?/i, "").replace(/-(local|network)$/i, "").toUpperCase();
+  const tag = code && code.length >= 2 && code.length <= 12 ? code : `Voice ${index + 1}`;
+  return `${langName(v.language)} · ${tag}`;
 }
+
+// ---- Markdown helpers -------------------------------------------------------
+// Blocks are kept as (light) Markdown so the reader can render headings,
+// lists and emphasis; the voice gets the plain text.
+
+const MD_INLINE_RE = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|~~[^~\n]+~~|!\[[^\]]*\]\([^)]*\)|\[[^\]\n]+\]\([^)\n]*\)|\*[^*\n]+\*|_[^_\n]+_)/g;
+
+type MdLine =
+  | { kind: "heading"; level: number; text: string }
+  | { kind: "bullet"; text: string }
+  | { kind: "number"; marker: string; text: string }
+  | { kind: "quote"; text: string }
+  | { kind: "rule" }
+  | { kind: "text"; text: string };
+
+function parseMdLine(line: string): MdLine {
+  const l = line.trim();
+  let m: RegExpMatchArray | null;
+  if ((m = l.match(/^(#{1,6})\s+(.*)$/))) return { kind: "heading", level: m[1].length, text: m[2].replace(/\s#+$/, "") };
+  if (/^([-*_]\s*){3,}$/.test(l)) return { kind: "rule" };
+  if ((m = l.match(/^[-*+•]\s+(.*)$/))) return { kind: "bullet", text: m[1] };
+  if ((m = l.match(/^(\d{1,3}[.)])\s+(.*)$/))) return { kind: "number", marker: m[1], text: m[2] };
+  if ((m = l.match(/^>\s?(.*)$/))) return { kind: "quote", text: m[1] };
+  return { kind: "text", text: l };
+}
+
+function isMdListLine(line: string) {
+  return /^\s*([-*+•]|\d{1,3}[.)])\s+\S/.test(line);
+}
+function isMdHeadingLine(line: string) {
+  return /^\s*#{1,6}\s+\S/.test(line);
+}
+
+/** Strip Markdown syntax: what the voice should actually say. */
+function mdToPlain(s: string) {
+  return s
+    .split("\n")
+    .map((line) => {
+      const p = parseMdLine(line);
+      if (p.kind === "rule") return "";
+      if (p.kind === "number") return `${p.marker} ${p.text}`;
+      return p.text;
+    })
+    .join("\n")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__)([^*_]+)\1/g, "$2")
+    .replace(/(^|[^\w*])\*([^*\n]+)\*(?!\w)/g, "$1$2")
+    .replace(/(^|[^\w_])_([^_\n]+)_(?!\w)/g, "$1$2")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/<[^>\n]{1,40}>/g, " ")
+    .replace(/\|/g, " · ")
+    .trim();
+}
+
+// =====================================================================
+// COMIC UI: flat fill + fat ink outline + hard offset shadow.
+// Same recipe as Pay & Plan's ComicUi.kt, rebuilt with React Native views.
+// =====================================================================
+
+type ComicBoxProps = {
+  children?: React.ReactNode;
+  palette: Palette;
+  color?: string;
+  radius?: number;
+  stroke?: number;
+  shadow?: number;
+  style?: StyleProp<ViewStyle>;
+  contentStyle?: StyleProp<ViewStyle>;
+  onPress?: () => void;
+  disabled?: boolean;
+  hitSlop?: number;
+};
+
+function ComicBox({
+  children, palette, color, radius = 20, stroke = 3, shadow = 5, style, contentStyle, onPress, disabled, hitSlop,
+}: ComicBoxProps) {
+  const bg = color ?? palette.surface;
+  const render = (pressed: boolean) => {
+    const drop = pressed && onPress && !disabled ? 1 : shadow;
+    return (
+      <>
+        {shadow > 0 && (
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute",
+              top: drop,
+              left: drop,
+              right: -drop,
+              bottom: -drop,
+              backgroundColor: palette.shadow,
+              borderRadius: radius,
+            }}
+          />
+        )}
+        <View
+          style={[
+            { backgroundColor: bg, borderWidth: stroke, borderColor: palette.ink, borderRadius: radius, overflow: "hidden" },
+            contentStyle,
+          ]}
+        >
+          {children}
+        </View>
+      </>
+    );
+  };
+
+  if (!onPress) {
+    return <View style={[style, disabled && { opacity: 0.45 }]}>{render(false)}</View>;
+  }
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      hitSlop={hitSlop}
+      style={({ pressed }) => [
+        style,
+        disabled && { opacity: 0.45 },
+        pressed && !disabled ? { transform: [{ translateX: shadow - 1 }, { translateY: shadow - 1 }] } : null,
+      ]}
+    >
+      {({ pressed }) => render(pressed)}
+    </Pressable>
+  );
+}
+
+type ComicButtonProps = {
+  text: string;
+  onPress: () => void;
+  palette: Palette;
+  color?: string;
+  icon?: string;
+  disabled?: boolean;
+  compact?: boolean;
+  style?: StyleProp<ViewStyle>;
+  textStyle?: StyleProp<TextStyle>;
+};
+
+function ComicButton({ text, onPress, palette, color = CORAL, icon, disabled, compact, style, textStyle }: ComicButtonProps) {
+  return (
+    <ComicBox
+      palette={palette}
+      color={color}
+      radius={compact ? 14 : 18}
+      shadow={compact ? 4 : 5}
+      onPress={onPress}
+      disabled={disabled}
+      style={style}
+      contentStyle={{
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        paddingHorizontal: compact ? 12 : 18,
+        paddingVertical: compact ? 8 : 12,
+      }}
+    >
+      {icon ? <Text style={{ fontSize: compact ? 15 : 18, marginRight: 6 }}>{icon}</Text> : null}
+      <Text
+        numberOfLines={1}
+        style={[
+          { fontFamily: FONT_BOLD, fontSize: compact ? 13 : 16, color: INK, letterSpacing: 0.5 },
+          textStyle,
+        ]}
+      >
+        {text}
+      </Text>
+    </ComicBox>
+  );
+}
+
+type ComicIconButtonProps = {
+  icon: string;
+  onPress: () => void;
+  palette: Palette;
+  color?: string;
+  size?: number;
+  disabled?: boolean;
+  fontSize?: number;
+  iconColor?: string;
+  style?: StyleProp<ViewStyle>;
+};
+
+function ComicIconButton({ icon, onPress, palette, color, size = 46, disabled, fontSize, iconColor, style }: ComicIconButtonProps) {
+  return (
+    <ComicBox
+      palette={palette}
+      color={color ?? palette.surface}
+      radius={size / 2}
+      shadow={4}
+      onPress={onPress}
+      disabled={disabled}
+      style={style}
+      contentStyle={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}
+    >
+      <Text style={{ fontSize: fontSize ?? size * 0.44, color: iconColor ?? (color ? INK : palette.text), fontFamily: FONT_BOLD, includeFontPadding: false }}>
+        {icon}
+      </Text>
+    </ComicBox>
+  );
+}
+
+type ComicChipProps = { text: string; selected: boolean; onPress: () => void; palette: Palette; color?: string; style?: StyleProp<ViewStyle> };
+
+function ComicChip({ text, selected, onPress, palette, color = SKY, style }: ComicChipProps) {
+  return (
+    <ComicBox
+      palette={palette}
+      color={selected ? color : palette.surface}
+      radius={14}
+      stroke={selected ? 3 : 2}
+      shadow={selected ? 4 : 2}
+      onPress={onPress}
+      style={style}
+      contentStyle={{ paddingHorizontal: 14, paddingVertical: 8 }}
+    >
+      <Text numberOfLines={1} style={{ fontFamily: FONT_BOLD, fontSize: 14, color: selected ? INK : palette.text, letterSpacing: 0.3 }}>
+        {text}
+      </Text>
+    </ComicBox>
+  );
+}
+
+function PosterTitle({ text, palette, size = 28, color, style }: { text: string; palette: Palette; size?: number; color?: string; style?: StyleProp<TextStyle> }) {
+  return (
+    <Text
+      numberOfLines={1}
+      style={[
+        { fontFamily: FONT_POSTER, fontSize: size, lineHeight: Math.round(size * 1.15), color: color ?? palette.text, letterSpacing: 1, includeFontPadding: false },
+        style,
+      ]}
+    >
+      {text}
+    </Text>
+  );
+}
+
+// =====================================================================
 
 type RowProps = {
   text: string;
@@ -405,40 +719,138 @@ type RowProps = {
   palette: Palette;
   onPress: (i: number) => void;
 };
+/** Inline Markdown (bold, italic, code, strike, links) as nested Text spans. */
+function renderInline(text: string, base: TextStyle, palette: Palette, strong: boolean): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let last = 0;
+  let k = 0;
+  const re = new RegExp(MD_INLINE_RE.source, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const tok = m[0];
+    let inner = tok;
+    let style: TextStyle = {};
+    if (tok.startsWith("**") || tok.startsWith("__")) {
+      inner = tok.slice(2, -2);
+      style = { fontFamily: FONT_BOLD };
+    } else if (tok.startsWith("`")) {
+      inner = tok.slice(1, -1);
+      style = { fontFamily: "monospace", fontSize: (base.fontSize ?? 17) * 0.9, backgroundColor: palette.surface2, color: palette.text };
+    } else if (tok.startsWith("~~")) {
+      inner = tok.slice(2, -2);
+      style = { textDecorationLine: "line-through" };
+    } else if (tok.startsWith("![")) {
+      const mm = tok.match(/^!\[([^\]]*)\]/);
+      inner = mm && mm[1] ? `🖼 ${mm[1]}` : "🖼";
+      style = { color: palette.dim, fontStyle: "italic" };
+    } else if (tok.startsWith("[")) {
+      const mm = tok.match(/^\[([^\]]+)\]/);
+      inner = mm ? mm[1] : tok;
+      style = { textDecorationLine: "underline", color: strong ? INK : SKY, fontFamily: FONT_BOLD };
+    } else {
+      inner = tok.slice(1, -1);
+      style = { fontStyle: "italic" };
+    }
+    nodes.push(<Text key={k++} style={style}>{inner}</Text>);
+    last = m.index + tok.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+type MdBlockProps = { text: string; fontSize: number; color: string; palette: Palette; strong: boolean };
+
+/** One reading block rendered as light Markdown. */
+function MdBlock({ text, fontSize, color, palette, strong }: MdBlockProps) {
+  const lineHeight = Math.round(fontSize * 1.5);
+  const body: TextStyle = { color, fontSize, lineHeight, fontFamily: strong ? FONT_BOLD : FONT_BODY };
+  const lines = text.split("\n").filter((l) => l.trim().length > 0);
+  return (
+    <View>
+      {lines.map((line, i) => {
+        const p = parseMdLine(line);
+        if (p.kind === "heading") {
+          const scale = p.level === 1 ? 1.55 : p.level === 2 ? 1.35 : p.level === 3 ? 1.18 : 1.05;
+          const size = Math.round(fontSize * scale);
+          const poster = p.level <= 2;
+          return (
+            <Text
+              key={i}
+              style={{
+                color,
+                fontSize: size,
+                lineHeight: Math.round(size * 1.25),
+                fontFamily: poster ? FONT_POSTER : FONT_BOLD,
+                letterSpacing: poster ? 0.8 : 0,
+                marginTop: i === 0 ? 6 : 10,
+                marginBottom: 2,
+                includeFontPadding: false,
+              }}
+            >
+              {renderInline(poster ? p.text.toUpperCase() : p.text, body, palette, strong)}
+            </Text>
+          );
+        }
+        if (p.kind === "rule") {
+          return <View key={i} style={{ height: 3, backgroundColor: palette.ink, borderRadius: 2, marginVertical: 10, opacity: 0.5 }} />;
+        }
+        if (p.kind === "bullet" || p.kind === "number") {
+          return (
+            <View key={i} style={{ flexDirection: "row", alignItems: "flex-start", paddingLeft: 6 }}>
+              <Text style={[body, { fontFamily: FONT_BOLD, width: p.kind === "bullet" ? 20 : 30 }]}>
+                {p.kind === "bullet" ? "•" : p.marker}
+              </Text>
+              <Text style={[body, { flex: 1 }]}>{renderInline(p.text, body, palette, strong)}</Text>
+            </View>
+          );
+        }
+        if (p.kind === "quote") {
+          return (
+            <View key={i} style={{ flexDirection: "row", alignItems: "stretch" }}>
+              <View style={{ width: 4, borderRadius: 2, backgroundColor: strong ? INK : palette.ink, marginRight: 10, opacity: 0.7 }} />
+              <Text style={[body, { flex: 1, fontStyle: "italic" }]}>{renderInline(p.text, body, palette, strong)}</Text>
+            </View>
+          );
+        }
+        return (
+          <Text key={i} style={body}>{renderInline(p.text, body, palette, strong)}</Text>
+        );
+      })}
+    </View>
+  );
+}
+
 const SegmentRow = React.memo(function SegmentRow({
   text, index, active, fontSize, palette, onPress,
 }: RowProps) {
+  if (active) {
+    // the block being read becomes a yellow sticker
+    return (
+      <Pressable onPress={() => onPress(index)} style={rowStyles.activeWrap}>
+        <View pointerEvents="none" style={[rowStyles.activeShadow, { backgroundColor: palette.shadow }]} />
+        <View style={[rowStyles.activeCard, { backgroundColor: palette.hlBg, borderColor: palette.ink }]}>
+          <MdBlock text={text} fontSize={fontSize} color={palette.hlText} palette={palette} strong />
+        </View>
+      </Pressable>
+    );
+  }
   return (
-    <Pressable
-      onPress={() => onPress(index)}
-      android_ripple={{ color: palette.border }}
-      style={[
-        rowStyles.row,
-        { borderLeftColor: active ? palette.hlBar : "transparent" },
-        active && { backgroundColor: palette.hlBg },
-      ]}
-    >
-      <Text
-        style={{
-          color: active ? palette.hlText : palette.text,
-          fontSize,
-          lineHeight: Math.round(fontSize * 1.55),
-        }}
-      >
-        {text}
-      </Text>
+    <Pressable onPress={() => onPress(index)} style={rowStyles.row}>
+      <MdBlock text={text} fontSize={fontSize} color={palette.text} palette={palette} strong={false} />
     </Pressable>
   );
 });
 
 const rowStyles = StyleSheet.create({
   row: {
-    paddingVertical: 7,
+    paddingVertical: 6,
     paddingHorizontal: 16,
-    borderLeftWidth: 3,
-    borderRadius: 6,
     marginVertical: 1,
   },
+  activeWrap: { marginHorizontal: 10, marginVertical: 6 },
+  activeShadow: { position: "absolute", top: 4, left: 4, right: -4, bottom: -4, borderRadius: 16 },
+  activeCard: { borderWidth: 3, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8 },
 });
 
 function AppInner() {
@@ -463,7 +875,7 @@ function AppInner() {
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const pendingAutoStartRef = useRef(false);
 
-  const [themeName, setThemeName] = useState<ThemeName>("dark");
+  const [themeName, setThemeName] = useState<ThemeName>("light");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [fontIndex, setFontIndex] = useState(2);
 
@@ -511,9 +923,9 @@ function AppInner() {
   }, [chapters, currentIdx]);
 
   const currentVoiceLabel = useMemo(() => {
-    if (!voiceId) return "Predefinita di sistema";
+    if (!voiceId) return "System default";
     const i = voices.findIndex((v) => v.id === voiceId);
-    return i >= 0 ? voiceLabel(voices[i], i) : "Voce selezionata";
+    return i >= 0 ? voiceLabel(voices[i], i) : "Selected voice";
   }, [voiceId, voices]);
 
   // ====== AUTOSCROLL: tieni la frase in lettura in vista ======
@@ -545,7 +957,8 @@ function AppInner() {
         if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "sepia") {
           setThemeName(savedTheme);
         } else {
-          setThemeName(systemScheme === "light" ? "light" : "dark");
+          // the comic look is bright by default; dark only when the system asks for it
+          setThemeName(systemScheme === "dark" ? "dark" : "light");
         }
         if (savedFont != null) {
           const fi = Number(savedFont);
@@ -572,7 +985,7 @@ function AppInner() {
     (async () => {
       try {
         await Tts.getInitStatus();
-        try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+        try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {}
         try { await Tts.setDefaultPitch(1.0); } catch {}
         try { await Tts.setDefaultRate(rate, true); } catch {}
         setTtsReady(true);
@@ -584,7 +997,7 @@ function AppInner() {
     subErr = Tts.addEventListener("tts-error", () => {
       if (!ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
-        Alert.alert("Sintesi vocale", "Alcuni testi contengono caratteri difficili. Se succede spesso, prova a ridurre la velocità.");
+        Alert.alert("Text to speech", "Some text contains characters the voice cannot handle. If it happens often, try a lower speed.");
       }
     });
 
@@ -602,21 +1015,23 @@ function AppInner() {
     Tts.setDefaultRate(rate, true).catch(() => {});
   }, [rate, ttsReady, settingsLoaded]);
 
-  // carica le voci italiane installate quando il motore e' pronto
+  // load the installed voices once the engine is ready
   useEffect(() => {
     if (!ttsReady) return;
     (async () => {
       try {
         const all: Voice[] = await Tts.voices();
-        const it = (all || []).filter(
-          (v) => v && !v.notInstalled && typeof v.language === "string" && v.language.toLowerCase().startsWith("it")
-        );
-        it.sort(
+        const dev = DEVICE_LANG.toLowerCase().split("-")[0];
+        const list = (all || []).filter((v) => v && !v.notInstalled && typeof v.language === "string");
+        // device language first, then offline voices, then by language and name
+        list.sort(
           (a, b) =>
+            (String(a.language).toLowerCase().startsWith(dev) ? 0 : 1) - (String(b.language).toLowerCase().startsWith(dev) ? 0 : 1) ||
+            langName(a.language).localeCompare(langName(b.language)) ||
             (a.networkConnectionRequired ? 1 : 0) - (b.networkConnectionRequired ? 1 : 0) ||
             String(a.name || a.id).localeCompare(String(b.name || b.id))
         );
-        setVoices(it);
+        setVoices(list);
       } catch {}
     })();
   }, [ttsReady]);
@@ -663,13 +1078,14 @@ function AppInner() {
   };
 
   const speakOne = async (text: string) => {
-    const a = sanitizeForTts(text);
+    const plain = mdToPlain(text);
+    const a = sanitizeForTts(plain);
     if (!a) return true;
     try {
       await Tts.speak(a);
       return true;
     } catch {
-      const b = sanitizeForTtsStrong(text);
+      const b = sanitizeForTtsStrong(plain);
       if (!b) return true;
       try { await Tts.speak(b); return true; } catch { return false; }
     }
@@ -718,8 +1134,8 @@ function AppInner() {
       if (!ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
         Alert.alert(
-          "Sintesi vocale",
-          "Il motore vocale del telefono non è ancora pronto. Attendi qualche secondo e riprova; se persiste, apri Impostazioni Android › Lingua e immissione › Sintesi vocale e verifica che sia installata una voce italiana."
+          "Text to speech",
+          "The phone's speech engine is not ready yet. Wait a few seconds and try again; if it persists, open Android Settings › Language & input › Text-to-speech and check that a voice is installed."
         );
       }
       setIsReading(false);
@@ -730,9 +1146,9 @@ function AppInner() {
     // dopo la voce la sovrascriverebbe, quindi sono alternative.
     if (voiceIdRef.current) {
       try { await Tts.setDefaultVoice(voiceIdRef.current); }
-      catch { try { await Tts.setDefaultLanguage("it-IT"); } catch {} }
+      catch { try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {} }
     } else {
-      try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+      try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {}
     }
     await safeStop();
 
@@ -753,7 +1169,7 @@ function AppInner() {
       const ok = await speakOne(segs[i]);
       if (!ok && !ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
-        Alert.alert("Sintesi vocale", "Alcune parti non sono leggibili dal TTS. Riduci la velocità o cambia voce TTS.");
+        Alert.alert("Text to speech", "Some parts cannot be read by the voice. Lower the speed or pick another voice.");
       }
       await waitTtsDone(sessionToken, 60000);
     }
@@ -811,11 +1227,13 @@ function AppInner() {
     if (!ready) return;
     try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
     if (id) {
-      try { await Tts.setDefaultVoice(id); } catch { try { await Tts.setDefaultLanguage("it-IT"); } catch {} }
+      try { await Tts.setDefaultVoice(id); } catch { try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {} }
     } else {
-      try { await Tts.setDefaultLanguage("it-IT"); } catch {}
+      try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {}
     }
-    try { await Tts.speak("Ciao, questa è la voce selezionata."); } catch {}
+    const lang = (id ? voices.find((v) => v.id === id)?.language : DEVICE_LANG) || DEVICE_LANG;
+    const phrase = lang.toLowerCase().startsWith("it") ? "Ciao, questa è la voce selezionata." : "Hi, this is the selected voice.";
+    try { await Tts.speak(phrase); } catch {}
   };
 
   const openInstallVoices = async () => {
@@ -823,18 +1241,24 @@ function AppInner() {
     try { await Tts.requestInstallData(); }
     catch {
       Alert.alert(
-        "Voci",
-        "Apri Impostazioni Android › Sistema › Lingue e immissione › Sintesi vocale per gestire o installare altre voci."
+        "Voices",
+        "Open Android Settings › System › Languages & input › Text-to-speech to manage or install more voices."
       );
     }
   };
 
   // ====== APPLY TEXT ======
-  const applyTextForCurrentFile = async (fid: string, text: string) => {
-    const cleaned = postCleanExtractedText(text);
+  // `extracted`: text pulled out of a PDF/DOCX (needs de-noising: page numbers,
+  // repeated headers...). `markdown`: source is a .md file, honour its syntax.
+  const applyTextForCurrentFile = async (
+    fid: string,
+    text: string,
+    opts: { extracted?: boolean; markdown?: boolean } = {}
+  ) => {
+    const cleaned = opts.extracted ? postCleanExtractedText(text) : normalizeText(text);
     setRawText(cleaned);
 
-    const segs = segmentIntoSentences(cleaned);
+    const segs = segmentIntoSentences(cleaned, { markdown: !!opts.markdown });
     segmentsRef.current = segs;
     setSegments(segs);
     setChapters(buildChapters(segs));
@@ -865,24 +1289,27 @@ function AppInner() {
 
     let localPath = "";
     const ext = extOf(name);
+    console.log("[open]", JSON.stringify({ name, uri: uri.slice(0, 120), mime, ext, fromShare, autoStart }));
 
     try {
       if (fromShare) {
         localPath = await copySharedUriToCache(uri, name);
+        console.log("[open] copied to", localPath);
       } else {
         const copied = await keepLocalCopy({
           destination: "cachesDirectory",
           files: [{ uri, fileName: name }],
         });
         const localUri = copied[0]?.status === "success" ? copied[0].localUri : null;
-        if (!localUri) throw new Error("Impossibile creare una copia locale del file (picker).");
+        if (!localUri) throw new Error("Could not create a local copy of the file.");
         localPath = localUri.replace("file://", "");
       }
 
       if (isTextLikeExt(ext) || (mime ?? "").startsWith("text/")) {
         const raw = await RNFS.readFile(localPath, "utf8");
         const finalText = ext === "rtf" ? stripRtf(raw) : raw;
-        const start = await applyTextForCurrentFile(fid, finalText);
+        const markdown = ext === "md" || ext === "markdown" || (mime ?? "").includes("markdown");
+        const start = await applyTextForCurrentFile(fid, finalText, { markdown });
         setIsExtracting(false);
         if (autoStart) setTimeout(() => speakFrom(start), 200);
         return;
@@ -898,7 +1325,7 @@ function AppInner() {
 
       if (ext === "docx" || (mime ?? "").includes("wordprocessingml")) {
         const docText = await extractDocxText(localPath);
-        const start = await applyTextForCurrentFile(fid, docText);
+        const start = await applyTextForCurrentFile(fid, docText, { extracted: true });
         setIsExtracting(false);
         if (autoStart) setTimeout(() => speakFrom(start), 200);
         return;
@@ -906,6 +1333,7 @@ function AppInner() {
 
       if (ext === "pdf" || mime === "application/pdf") {
         const b64 = await RNFS.readFile(localPath, "base64");
+        console.log("[open] pdf base64 length", b64.length);
         pendingAutoStartRef.current = autoStart;
         setPdfBase64(b64);
         return; // isExtracting resta true finché la WebView risponde
@@ -919,11 +1347,38 @@ function AppInner() {
         return;
       } catch {
         setIsExtracting(false);
-        Alert.alert("Formato non supportato", `Non riesco a leggere:\n${name}`);
+        Alert.alert("Unsupported format", `I can't read:\n${name}`);
       }
     } catch (err: any) {
+      console.log("[open] error", String(err?.message ?? err));
       setIsExtracting(false);
-      Alert.alert("Errore", String(err?.message ?? err ?? "Errore apertura file"));
+      Alert.alert("Error", String(err?.message ?? err ?? "Could not open the file"));
+    }
+  };
+
+  // Text that arrives without a file (share sheet "text" payload).
+  const openSharedText = async (title: string, text: string, autoStart: boolean) => {
+    setIsExtracting(true);
+    await hardStop();
+    setSegments([]);
+    segmentsRef.current = [];
+    setChapters([]);
+    setRawText("");
+    setPicked({ name: title, uri: "", type: "text/plain" });
+    // stable id from the content so progress is kept if the same text comes back
+    let h = 0;
+    for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
+    const fid = makeFileId(`shared-${(h >>> 0).toString(16)}`, "text/plain");
+    setFileId(fid);
+    fileIdRef.current = fid;
+    try {
+      const looksMd = /^\s*#{1,6}\s|\n\s*[-*+]\s|\*\*[^*]+\*\*/.test(text);
+      const start = await applyTextForCurrentFile(fid, text, { markdown: looksMd });
+      setIsExtracting(false);
+      if (autoStart) setTimeout(() => speakFrom(start), 200);
+    } catch (err: any) {
+      setIsExtracting(false);
+      Alert.alert("Error", String(err?.message ?? err ?? "Could not read the shared text"));
     }
   };
 
@@ -938,7 +1393,7 @@ function AppInner() {
       setIsExtracting(false);
       const msg = String(err?.message ?? "");
       if (msg.toLowerCase().includes("cancel")) return;
-      Alert.alert("Errore", msg || "Errore scelta file");
+      Alert.alert("Error", msg || "Could not pick the file");
     }
   };
 
@@ -946,31 +1401,84 @@ function AppInner() {
   // Nessun clearReceivedFiles(): azzererebbe per sempre il listener della libreria
   // (singleton isClear=true). Il lato nativo annulla gia' l'intent dopo la lettura,
   // quindi i foreground successivi tornano vuoti e non riaprono il file.
+  // The library asks the native side only once at mount (plus AppState
+  // "active"). On a cold start JS often runs before the Activity is attached
+  // (getCurrentActivity() == null) and that first call never resolves, so the
+  // share is silently lost. We call the native module ourselves with retries;
+  // the native side clears the intent after the first successful read, so
+  // repeated calls are harmless.
   useEffect(() => {
-    ReceiveSharingIntent.getReceivedFiles(
-      async (files: any[]) => {
+    const native = NativeModules?.ReceiveSharingIntent;
+    let cancelled = false;
+
+    const handleFiles = async (files: any[]) => {
+        console.log("[share] files", JSON.stringify(files).slice(0, 600));
         if (!files || files.length === 0) return;
         if (processingShareRef.current) return;
         processingShareRef.current = true;
         try {
           const f = files[0];
-          const name = f?.fileName || f?.filePath?.split?.(/[\\/]/).pop?.() || "condiviso";
+          const name = f?.fileName || f?.filePath?.split?.(/[\\/]/).pop?.() || "shared";
           const mime = f?.mimeType || "";
           const uri =
             f?.contentUri ||
             (f?.filePath ? (f.filePath.startsWith("file://") ? f.filePath : `file://${f.filePath}`) : null);
-          if (!uri) return;
+          if (!uri) {
+            // Plain text shared from another app (a selection, a note, a message):
+            // no file behind it, the text itself is the document.
+            const sharedText = String(f?.text || "").trim();
+            const link = String(f?.weblink || "").trim();
+            if (sharedText) {
+              const title = String(f?.subject || "").trim() || "Shared text";
+              await openSharedText(title, sharedText, true);
+            } else if (link) {
+              Alert.alert("Sharing", "Links are not fetched yet. Share the page text or a file instead.");
+            }
+            return;
+          }
           await openFileFromUri(name, uri, mime, true, true);
         } catch (e: any) {
-          Alert.alert("Condivisione", String(e?.message ?? e ?? "Errore"));
+          console.log("[share] error", String(e?.message ?? e));
+          Alert.alert("Sharing", String(e?.message ?? e ?? "Error"));
           setIsExtracting(false);
         } finally {
           processingShareRef.current = false;
         }
-      },
-      () => {},
-      "ShareMedia"
-    );
+    };
+
+    const poll = (reason: string) => {
+      if (cancelled) return;
+      console.log("[share] poll", reason, "native=", !!native, "fn=", typeof native?.getFileNames);
+      if (!native?.getFileNames) {
+        console.log("[share] native module missing");
+        return;
+      }
+      native
+        .getFileNames()
+        .then((obj: any) => {
+          const files = obj ? Object.keys(obj).map((k) => obj[k]) : [];
+          if (files.length) console.log("[share] got files on", reason);
+          handleFiles(files);
+        })
+        .catch((e: any) => {
+          // "Invalid file type." / NPE on a null intent = nothing pending (normal)
+          const msg = String(e?.message ?? e ?? "");
+          if (!/Invalid file type|NullPointer|null object/i.test(msg)) console.log("[share] native error:", msg);
+        });
+    };
+
+    // cold start: several attempts while the Activity gets attached
+    poll("mount");
+    const timers = [400, 1200, 2500, 5000].map((ms) => setTimeout(() => poll(`t+${ms}`), ms));
+    // warm start (app already running, brought to front by the share sheet)
+    const sub = AppState.addEventListener("change", (st) => {
+      if (st === "active") poll("appstate");
+    });
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+      sub.remove();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -989,6 +1497,18 @@ function AppInner() {
   );
 
   const busy = isExtracting;
+  const hasDoc = segments.length > 0;
+
+  const docKindColor = (() => {
+    const ext = extOf(picked?.name ?? "");
+    if (ext === "pdf") return CORAL;
+    if (ext === "docx" || ext === "doc") return SKY;
+    if (ext === "rtf") return GRAPE;
+    if (ext === "md" || ext === "markdown") return TANGERINE;
+    return MINT;
+  })();
+
+  const sheetBottom = Math.max(12, insets.bottom + 8);
 
   return (
     <View style={[s.container, { paddingTop: insets.top }]}>
@@ -996,266 +1516,295 @@ function AppInner() {
 
       {/* HEADER */}
       <View style={s.header}>
-        <Pressable onPress={pickFile} disabled={busy} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
-          <Text style={s.headerIcon}>📂</Text>
-        </Pressable>
-
-        <Pressable onPress={goToCurrent} style={s.headerTitleWrap}>
-          <Text numberOfLines={1} style={s.headerTitle}>
-            {picked?.name || "LeggiMi"}
-          </Text>
-          {segments.length > 0 && (
-            <Text numberOfLines={1} style={s.headerSub}>
-              {currentChapterIdx >= 0 ? `${chapters[currentChapterIdx].title} · ` : ""}{pct}% · frase {currentIdx + 1}/{segments.length}
-            </Text>
-          )}
-        </Pressable>
-
+        <PosterTitle text="LEGGIMI" palette={palette} size={30} style={{ flex: 1 }} />
+        <ComicIconButton icon="📂" onPress={pickFile} disabled={busy} palette={palette} color={YELLOW} fontSize={20} style={s.headerBtn} />
         {chapters.length > 1 && (
-          <Pressable onPress={() => setChaptersOpen(true)} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
-            <Text style={s.headerIcon}>☰</Text>
-          </Pressable>
+          <ComicIconButton icon="☰" onPress={() => setChaptersOpen(true)} palette={palette} color={SKY} fontSize={20} style={s.headerBtn} />
         )}
-        <Pressable onPress={() => setSettingsOpen(true)} style={s.headerBtn} android_ripple={{ color: palette.border, borderless: true }}>
-          <Text style={s.headerAa}>Aa</Text>
-        </Pressable>
+        <ComicIconButton icon="Aa" onPress={() => setSettingsOpen(true)} palette={palette} color={MINT} fontSize={17} style={s.headerBtn} />
       </View>
 
-      {/* PROGRESS BAR */}
-      <View style={s.progressTrack}>
-        <View style={[s.progressFill, { width: `${pct}%` }]} />
-      </View>
+      {/* DOCUMENT STICKER + PROGRESS */}
+      {(hasDoc || busy) && picked && (
+        <ComicBox palette={palette} color={docKindColor} radius={18} style={s.docCard} onPress={goToCurrent} contentStyle={s.docCardInner}>
+          <View style={s.docRow}>
+            <View style={s.docBadge}>
+              <Text style={s.docBadgeText}>{(extOf(picked.name) || (picked.type === "text/plain" ? "txt" : "doc")).toUpperCase().slice(0, 4)}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={s.docTitle}>{picked.name}</Text>
+              {hasDoc ? (
+                <Text numberOfLines={1} style={s.docSub}>
+                  {currentChapterIdx >= 0 ? `${chapters[currentChapterIdx].title} · ` : ""}block {currentIdx + 1}/{segments.length}
+                </Text>
+              ) : (
+                <Text numberOfLines={1} style={s.docSub}>Reading the file…</Text>
+              )}
+            </View>
+            <Text style={s.docPct}>{pct}%</Text>
+          </View>
+          <View style={s.progressTrack}>
+            <View style={[s.progressFill, { width: `${Math.max(pct, 2)}%` }]} />
+          </View>
+        </ComicBox>
+      )}
 
       {/* CONTENUTO */}
       <View style={s.readerArea}>
-        {segments.length === 0 && !busy ? (
-          <View style={s.emptyWrap}>
-            <Text style={s.emptyEmoji}>📖</Text>
-            <Text style={s.emptyTitle}>Ascolta i tuoi documenti</Text>
-            <Text style={s.emptyText}>
-              Apri un file PDF, Word, TXT o RTF — oppure condividilo a LeggiMi da un'altra app — e te lo leggo ad alta voce.
-            </Text>
-            <Pressable onPress={pickFile} style={s.primaryBtn} android_ripple={{ color: "#ffffff30" }}>
-              <Text style={s.primaryBtnText}>Apri un documento</Text>
-            </Pressable>
-            <Text style={s.emptyHint}>Suggerimento: in qualsiasi app premi “Condividi” e scegli LeggiMi.</Text>
-          </View>
+        {!hasDoc && !busy ? (
+          <ScrollView contentContainerStyle={s.emptyScroll} showsVerticalScrollIndicator={false}>
+            <ComicBox palette={palette} radius={24} shadow={6} contentStyle={s.emptyCard}>
+              <Text style={s.emptyEmoji}>📖</Text>
+              <PosterTitle text="LISTEN TO YOUR" palette={palette} size={26} />
+              <PosterTitle text="DOCUMENTS" palette={palette} size={26} />
+              <Text style={s.emptyText}>
+                Open a PDF, Word, Markdown, TXT or RTF file — or share it to LeggiMi from any other app — and I will read it out loud.
+              </Text>
+              <View style={s.kindRow}>
+                {[
+                  ["PDF", CORAL],
+                  ["DOCX", SKY],
+                  ["TXT", MINT],
+                  ["RTF", GRAPE],
+                ].map(([k, c]) => (
+                  <View key={k} style={[s.kindSticker, { backgroundColor: c, borderColor: palette.ink }]}>
+                    <Text style={s.kindStickerText}>{k}</Text>
+                  </View>
+                ))}
+              </View>
+              <ComicButton text="OPEN A DOCUMENT" icon="📂" onPress={pickFile} palette={palette} color={YELLOW} style={{ marginTop: 18 }} />
+            </ComicBox>
+
+            <ComicBox palette={palette} color={SKY} radius={20} style={{ marginTop: 26 }} contentStyle={s.tipCard}>
+              <Text style={s.tipEmoji}>💡</Text>
+              <Text style={s.tipText}>
+                In any app tap <Text style={{ fontFamily: FONT_BOLD }}>Share</Text> and pick LeggiMi: I start reading right away. Selected text works too.
+              </Text>
+            </ComicBox>
+          </ScrollView>
         ) : (
-          <FlatList
-            ref={listRef}
-            data={segments}
-            keyExtractor={(_, i) => String(i)}
-            renderItem={renderItem}
-            extraData={`${currentIdx}|${fontSize}|${themeName}`}
-            initialNumToRender={20}
-            maxToRenderPerBatch={20}
-            windowSize={21}
-            contentContainerStyle={s.listContent}
-            showsVerticalScrollIndicator
-            onScrollToIndexFailed={(info) => {
-              listRef.current?.scrollToOffset({
-                offset: info.averageItemLength * info.index,
-                animated: false,
-              });
-              setTimeout(() => scrollToIndexSafe(info.index), 220);
-            }}
-          />
+          <ComicBox palette={palette} radius={22} shadow={5} style={s.readerCard} contentStyle={{ flex: 1 }}>
+            <FlatList
+              ref={listRef}
+              data={segments}
+              keyExtractor={(_, i) => String(i)}
+              renderItem={renderItem}
+              extraData={`${currentIdx}|${fontSize}|${themeName}`}
+              initialNumToRender={20}
+              maxToRenderPerBatch={20}
+              windowSize={21}
+              contentContainerStyle={s.listContent}
+              showsVerticalScrollIndicator
+              onScrollToIndexFailed={(info) => {
+                listRef.current?.scrollToOffset({
+                  offset: info.averageItemLength * info.index,
+                  animated: false,
+                });
+                setTimeout(() => scrollToIndexSafe(info.index), 220);
+              }}
+            />
+          </ComicBox>
         )}
 
         {busy && (
           <View style={s.loadingOverlay}>
-            <ActivityIndicator size="large" color={palette.accent} />
-            <Text style={s.loadingText}>Estrazione del testo…</Text>
-            {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
+            <ComicBox palette={palette} color={YELLOW} radius={22} shadow={6} contentStyle={s.loadingCard}>
+              <ActivityIndicator size="large" color={INK} />
+              <PosterTitle text="ONE MOMENT…" palette={palette} size={22} color={INK} style={{ marginTop: 12 }} />
+              <Text style={s.loadingText}>Extracting the text</Text>
+              {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
+            </ComicBox>
           </View>
         )}
       </View>
 
       {/* TRANSPORT BAR */}
-      <View style={[s.transport, { paddingBottom: Math.max(12, insets.bottom) }]}>
-        <Pressable
-          onPress={() => skipSegment(-1)}
-          disabled={segments.length === 0}
-          style={[s.tBtn, segments.length === 0 && s.tDisabled]}
-          android_ripple={{ color: palette.border, borderless: true }}
-        >
-          <Text style={s.tIcon}>⏮</Text>
-          <Text style={s.tLabel}>Prec.</Text>
-        </Pressable>
+      <ComicBox palette={palette} radius={26} shadow={5} style={[s.transportWrap, { marginBottom: Math.max(12, insets.bottom) }]} contentStyle={s.transport}>
+        <View style={s.tItem}>
+          <ComicIconButton icon="⏮" onPress={() => skipSegment(-1)} disabled={!hasDoc} palette={palette} color={palette.surface2} size={48} fontSize={20} />
+          <Text style={s.tLabel}>Prev</Text>
+        </View>
 
-        <Pressable
-          onPress={onPlayPress}
-          disabled={!canRead || busy}
-          style={[s.playBtn, (!canRead || busy) && s.tDisabled]}
-          android_ripple={{ color: "#ffffff40", borderless: true }}
-        >
-          <Text style={s.playIcon}>{isReading ? "❚❚" : "►"}</Text>
-        </Pressable>
+        <View style={s.tItem}>
+          <ComicIconButton
+            icon={isReading ? "❚❚" : "▶"}
+            onPress={onPlayPress}
+            disabled={!canRead || busy}
+            palette={palette}
+            color={isReading ? CORAL : MINT}
+            size={72}
+            fontSize={isReading ? 24 : 30}
+            iconColor={INK}
+          />
+          <Text style={s.tLabel}>{isReading ? "Pause" : isPaused ? "Resume" : "Play"}</Text>
+        </View>
 
-        <Pressable
-          onPress={() => skipSegment(1)}
-          disabled={segments.length === 0}
-          style={[s.tBtn, segments.length === 0 && s.tDisabled]}
-          android_ripple={{ color: palette.border, borderless: true }}
-        >
-          <Text style={s.tIcon}>⏭</Text>
-          <Text style={s.tLabel}>Succ.</Text>
-        </Pressable>
+        <View style={s.tItem}>
+          <ComicIconButton icon="⏭" onPress={() => skipSegment(1)} disabled={!hasDoc} palette={palette} color={palette.surface2} size={48} fontSize={20} />
+          <Text style={s.tLabel}>Next</Text>
+        </View>
 
-        <Pressable onPress={cycleSpeed} style={s.speedPill} android_ripple={{ color: palette.border }}>
-          <Text style={s.speedText}>{rate.toFixed(2)}×</Text>
-          <Text style={s.tLabel}>Velocità</Text>
-        </Pressable>
-      </View>
+        <View style={s.tItem}>
+          <ComicBox palette={palette} color={YELLOW} radius={16} shadow={4} onPress={cycleSpeed} contentStyle={s.speedPill}>
+            <Text style={s.speedText}>{rate.toFixed(2)}×</Text>
+          </ComicBox>
+          <Text style={s.tLabel}>Speed</Text>
+        </View>
+      </ComicBox>
 
       {/* SHEET IMPOSTAZIONI */}
       <Modal visible={settingsOpen} transparent animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setSettingsOpen(false)} />
-        <View style={s.sheet}>
-          <View style={s.sheetHandle} />
-          <Text style={s.sheetTitle}>Impostazioni lettura</Text>
+        <View style={[s.sheetWrap, { bottom: sheetBottom }]}>
+          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View style={s.sheetHead}>
+                <Text style={s.sheetEmoji}>🎨</Text>
+                <PosterTitle text="READING" palette={palette} size={26} />
+              </View>
 
-          <Text style={s.sheetLabel}>Tema</Text>
-          <View style={s.segmented}>
-            {(["dark", "light", "sepia"] as ThemeName[]).map((t) => (
-              <Pressable
-                key={t}
-                onPress={() => setThemeName(t)}
-                style={[s.segItem, themeName === t && s.segItemActive]}
+              <Text style={s.sheetLabel}>Theme</Text>
+              <View style={s.chipRow}>
+                <ComicChip text="Light" selected={themeName === "light"} onPress={() => setThemeName("light")} palette={palette} color={YELLOW} />
+                <ComicChip text="Sepia" selected={themeName === "sepia"} onPress={() => setThemeName("sepia")} palette={palette} color={TANGERINE} />
+                <ComicChip text="Dark" selected={themeName === "dark"} onPress={() => setThemeName("dark")} palette={palette} color={GRAPE} />
+              </View>
+
+              <Text style={s.sheetLabel}>Text size</Text>
+              <View style={s.fontRow}>
+                <ComicButton text="A−" onPress={() => setFontIndex((i) => Math.max(0, i - 1))} disabled={fontIndex <= 0} palette={palette} color={SKY} style={{ minWidth: 84 }} />
+                <View style={s.fontPreviewWrap}>
+                  <Text style={[s.fontPreview, { fontSize: Math.min(fontSize + 4, 30) }]}>Aa</Text>
+                  <Text style={s.fontPreviewMeta}>{fontSize}px</Text>
+                </View>
+                <ComicButton text="A+" onPress={() => setFontIndex((i) => Math.min(FONT_SIZES.length - 1, i + 1))} disabled={fontIndex >= FONT_SIZES.length - 1} palette={palette} color={SKY} style={{ minWidth: 84 }} />
+              </View>
+
+              <Text style={s.sheetLabel}>Voice speed · {rate.toFixed(2)}×</Text>
+              <ComicBox palette={palette} color={palette.surface2} radius={16} shadow={3} contentStyle={{ paddingHorizontal: 8, paddingVertical: 4 }}>
+                <Slider
+                  minimumValue={0.5}
+                  maximumValue={2.0}
+                  step={0.05}
+                  value={rate}
+                  onValueChange={setRate}
+                  minimumTrackTintColor={CORAL}
+                  maximumTrackTintColor={palette.ink}
+                  thumbTintColor={CORAL}
+                />
+              </ComicBox>
+
+              <Text style={s.sheetLabel}>Voice</Text>
+              <ComicBox
+                palette={palette}
+                radius={16}
+                shadow={4}
+                onPress={() => { setSettingsOpen(false); setVoicesOpen(true); }}
+                contentStyle={s.rowSelect}
               >
-                <Text style={[s.segText, themeName === t && s.segTextActive]}>
-                  {t === "dark" ? "Scuro" : t === "light" ? "Chiaro" : "Seppia"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+                <Text style={s.rowSelectEmoji}>🗣️</Text>
+                <Text style={s.rowSelectText} numberOfLines={1}>{currentVoiceLabel}</Text>
+                <Text style={s.rowSelectChevron}>›</Text>
+              </ComicBox>
 
-          <Text style={s.sheetLabel}>Dimensione testo</Text>
-          <View style={s.fontRow}>
-            <Pressable
-              onPress={() => setFontIndex((i) => Math.max(0, i - 1))}
-              disabled={fontIndex <= 0}
-              style={[s.fontBtn, fontIndex <= 0 && s.tDisabled]}
-            >
-              <Text style={s.fontBtnText}>A−</Text>
-            </Pressable>
-            <Text style={s.fontPreview}>{fontSize}px</Text>
-            <Pressable
-              onPress={() => setFontIndex((i) => Math.min(FONT_SIZES.length - 1, i + 1))}
-              disabled={fontIndex >= FONT_SIZES.length - 1}
-              style={[s.fontBtn, fontIndex >= FONT_SIZES.length - 1 && s.tDisabled]}
-            >
-              <Text style={s.fontBtnText}>A+</Text>
-            </Pressable>
-          </View>
-
-          <Text style={s.sheetLabel}>Velocità voce: {rate.toFixed(2)}×</Text>
-          <Slider
-            minimumValue={0.5}
-            maximumValue={2.0}
-            step={0.05}
-            value={rate}
-            onValueChange={setRate}
-            minimumTrackTintColor={palette.accent}
-            maximumTrackTintColor={palette.border}
-            thumbTintColor={palette.accent}
-          />
-
-          <Text style={s.sheetLabel}>Voce</Text>
-          <Pressable
-            onPress={() => { setSettingsOpen(false); setVoicesOpen(true); }}
-            style={s.rowSelect}
-            android_ripple={{ color: palette.border }}
-          >
-            <Text style={s.rowSelectText} numberOfLines={1}>{currentVoiceLabel}</Text>
-            <Text style={s.rowSelectChevron}>›</Text>
-          </Pressable>
-
-          <Pressable onPress={() => setSettingsOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
-            <Text style={s.sheetCloseText}>Fatto</Text>
-          </Pressable>
+              <ComicButton text="DONE" onPress={() => setSettingsOpen(false)} palette={palette} color={MINT} style={{ marginTop: 24 }} />
+            </ScrollView>
+          </ComicBox>
         </View>
       </Modal>
 
       {/* SHEET CAPITOLI */}
       <Modal visible={chaptersOpen} transparent animationType="slide" onRequestClose={() => setChaptersOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setChaptersOpen(false)} />
-        <View style={[s.sheet, { maxHeight: "70%" }]}>
-          <View style={s.sheetHandle} />
-          <Text style={s.sheetTitle}>Indice</Text>
-          <ScrollView style={{ marginTop: 4 }}>
-            {chapters.map((ch, idx) => {
-              const active = idx === currentChapterIdx;
-              return (
-                <Pressable
-                  key={idx}
-                  onPress={() => skipToChapter(ch)}
-                  style={[s.chapterRow, active && { backgroundColor: palette.surface2 }]}
-                  android_ripple={{ color: palette.border }}
-                >
-                  <Text style={[s.chapterText, active && { color: palette.accent, fontWeight: "700" }]} numberOfLines={2}>
-                    {ch.title}
-                  </Text>
-                  <Text style={s.chapterMeta}>{ch.startIndex + 1}–{ch.endIndex + 1}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-          <Pressable onPress={() => setChaptersOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
-            <Text style={s.sheetCloseText}>Chiudi</Text>
-          </Pressable>
+        <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "72%" }]}>
+          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+            <View style={s.sheetHead}>
+              <Text style={s.sheetEmoji}>📑</Text>
+              <PosterTitle text="CONTENTS" palette={palette} size={26} />
+            </View>
+            <ScrollView style={{ marginTop: 4, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+              {chapters.map((ch, idx) => {
+                const active = idx === currentChapterIdx;
+                return (
+                  <ComicBox
+                    key={idx}
+                    palette={palette}
+                    color={active ? YELLOW : palette.surface}
+                    radius={14}
+                    stroke={active ? 3 : 2}
+                    shadow={active ? 4 : 2}
+                    onPress={() => skipToChapter(ch)}
+                    style={s.listItem}
+                    contentStyle={s.chapterRow}
+                  >
+                    <Text style={[s.chapterText, active && { color: INK, fontFamily: FONT_BOLD }]} numberOfLines={2}>
+                      {ch.title}
+                    </Text>
+                    <Text style={[s.chapterMeta, active && { color: INK }]}>{ch.startIndex + 1}–{ch.endIndex + 1}</Text>
+                  </ComicBox>
+                );
+              })}
+            </ScrollView>
+            <ComicButton text="CLOSE" onPress={() => setChaptersOpen(false)} palette={palette} color={CORAL} style={{ marginTop: 18 }} />
+          </ComicBox>
         </View>
       </Modal>
 
       {/* SHEET VOCE */}
       <Modal visible={voicesOpen} transparent animationType="slide" onRequestClose={() => setVoicesOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setVoicesOpen(false)} />
-        <View style={[s.sheet, { maxHeight: "75%" }]}>
-          <View style={s.sheetHandle} />
-          <Text style={s.sheetTitle}>Voce italiana</Text>
-          <Text style={s.voiceHint}>Tocca una voce per ascoltarne un'anteprima. La scelta viene salvata automaticamente.</Text>
-          <ScrollView style={{ marginTop: 6 }}>
-            <Pressable
-              onPress={() => onSelectVoice(null)}
-              style={[s.chapterRow, !voiceId && { backgroundColor: palette.surface2 }]}
-              android_ripple={{ color: palette.border }}
-            >
-              <Text style={[s.chapterText, !voiceId && { color: palette.accent, fontWeight: "700" }]}>Predefinita di sistema</Text>
-              {!voiceId ? <Text style={s.voiceCheck}>✓</Text> : null}
-            </Pressable>
-            {voices.map((v, idx) => {
-              const active = v.id === voiceId;
-              return (
-                <Pressable
-                  key={v.id}
-                  onPress={() => onSelectVoice(v.id)}
-                  style={[s.chapterRow, active && { backgroundColor: palette.surface2 }]}
-                  android_ripple={{ color: palette.border }}
-                >
-                  <View style={{ flex: 1, paddingRight: 10 }}>
-                    <Text style={[s.chapterText, active && { color: palette.accent, fontWeight: "700" }]} numberOfLines={1}>
-                      {voiceLabel(v, idx)}
-                    </Text>
-                    {v.networkConnectionRequired ? <Text style={s.voiceMeta}>richiede connessione</Text> : null}
-                  </View>
-                  {active ? <Text style={s.voiceCheck}>✓</Text> : null}
-                </Pressable>
-              );
-            })}
-            {voices.length === 0 ? (
-              <Text style={s.voiceHint}>Nessuna voce italiana trovata sul telefono: installane una qui sotto.</Text>
-            ) : null}
-            <Pressable
-              onPress={openInstallVoices}
-              style={[s.chapterRow, { borderTopWidth: 1, borderTopColor: palette.border, marginTop: 6 }]}
-              android_ripple={{ color: palette.border }}
-            >
-              <Text style={[s.chapterText, { color: palette.accent }]}>+ Installa altre voci…</Text>
-            </Pressable>
-          </ScrollView>
-          <Pressable onPress={() => setVoicesOpen(false)} style={s.sheetClose} android_ripple={{ color: "#ffffff30" }}>
-            <Text style={s.sheetCloseText}>Chiudi</Text>
-          </Pressable>
+        <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "78%" }]}>
+          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+            <View style={s.sheetHead}>
+              <Text style={s.sheetEmoji}>🗣️</Text>
+              <PosterTitle text="VOICE" palette={palette} size={26} />
+            </View>
+            <Text style={s.voiceHint}>Tap a voice to hear a preview. Your choice is saved automatically.</Text>
+            <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+              <ComicBox
+                palette={palette}
+                color={!voiceId ? YELLOW : palette.surface}
+                radius={14}
+                stroke={!voiceId ? 3 : 2}
+                shadow={!voiceId ? 4 : 2}
+                onPress={() => onSelectVoice(null)}
+                style={s.listItem}
+                contentStyle={s.chapterRow}
+              >
+                <Text style={[s.chapterText, !voiceId && { color: INK, fontFamily: FONT_BOLD }]}>Predefinita di sistema</Text>
+                {!voiceId ? <Text style={s.voiceCheck}>✓</Text> : null}
+              </ComicBox>
+              {voices.map((v, idx) => {
+                const active = v.id === voiceId;
+                return (
+                  <ComicBox
+                    key={v.id}
+                    palette={palette}
+                    color={active ? YELLOW : palette.surface}
+                    radius={14}
+                    stroke={active ? 3 : 2}
+                    shadow={active ? 4 : 2}
+                    onPress={() => onSelectVoice(v.id)}
+                    style={s.listItem}
+                    contentStyle={s.chapterRow}
+                  >
+                    <View style={{ flex: 1, paddingRight: 10 }}>
+                      <Text style={[s.chapterText, active && { color: INK, fontFamily: FONT_BOLD }]} numberOfLines={1}>
+                        {voiceLabel(v, idx)}
+                      </Text>
+                      {v.networkConnectionRequired ? <Text style={[s.voiceMeta, active && { color: INK }]}>needs a connection</Text> : null}
+                    </View>
+                    {active ? <Text style={s.voiceCheck}>✓</Text> : null}
+                  </ComicBox>
+                );
+              })}
+              {voices.length === 0 ? (
+                <Text style={s.voiceHint}>No voices found on this phone: install one below.</Text>
+              ) : null}
+              <ComicButton text="INSTALL MORE VOICES…" icon="⬇️" onPress={openInstallVoices} palette={palette} color={SKY} compact style={{ alignSelf: "flex-start", marginTop: 10, marginLeft: 2 }} />
+            </ScrollView>
+            <ComicButton text="CLOSE" onPress={() => setVoicesOpen(false)} palette={palette} color={CORAL} style={{ marginTop: 18 }} />
+          </ComicBox>
         </View>
       </Modal>
 
@@ -1272,14 +1821,15 @@ function AppInner() {
           onMessage={async (e) => {
             try {
               const msg = JSON.parse(e.nativeEvent.data);
+              console.log("[pdf] message ok=", msg.ok, "len=", String(msg.text || "").length, msg.error || "");
               if (msg.ok) {
                 const t = String(msg.text || "").trim();
                 if (!t) {
-                  Alert.alert("PDF", "PDF senza testo (scansionato): serve OCR.");
+                  Alert.alert("PDF", "This PDF has no text layer (scanned): it would need OCR.");
                   return;
                 }
-                if (!fileId) throw new Error("fileId mancante");
-                const start = await applyTextForCurrentFile(fileId, t);
+                if (!fileId) throw new Error("missing fileId");
+                const start = await applyTextForCurrentFile(fileId, t, { extracted: true });
                 setIsExtracting(false);
                 setPdfBase64(null);
                 if (pendingAutoStartRef.current) {
@@ -1287,18 +1837,19 @@ function AppInner() {
                   setTimeout(() => speakFrom(start), 250);
                 }
               } else {
-                Alert.alert("PDF", msg.error || "Errore estrazione PDF offline");
+                Alert.alert("PDF", msg.error || "Could not extract text from the PDF");
               }
             } catch (err: any) {
-              Alert.alert("PDF", String(err?.message ?? "Errore parsing PDF"));
+              Alert.alert("PDF", String(err?.message ?? "Could not parse the PDF"));
             } finally {
               setIsExtracting(false);
               setPdfBase64(null);
               pendingAutoStartRef.current = false;
             }
           }}
-          onError={() => {
-            Alert.alert("PDF", "Errore WebView durante estrazione PDF offline");
+          onError={(e) => {
+            console.log("[pdf] webview error", JSON.stringify(e?.nativeEvent ?? {}));
+            Alert.alert("PDF", "The PDF reader failed while extracting text");
             setIsExtracting(false);
             setPdfBase64(null);
             pendingAutoStartRef.current = false;
@@ -1325,107 +1876,109 @@ function makeStyles(p: Palette) {
     header: {
       flexDirection: "row",
       alignItems: "center",
-      paddingHorizontal: 8,
-      height: 52,
+      paddingHorizontal: 16,
+      paddingTop: 10,
+      paddingBottom: 6,
+      gap: 10,
     },
-    headerBtn: { width: 44, height: 44, alignItems: "center", justifyContent: "center", borderRadius: 22 },
-    headerIcon: { fontSize: 20, color: p.text },
-    headerAa: { fontSize: 17, fontWeight: "800", color: p.text },
-    headerTitleWrap: { flex: 1, paddingHorizontal: 6 },
-    headerTitle: { color: p.text, fontSize: 15, fontWeight: "700" },
-    headerSub: { color: p.dim, fontSize: 11, marginTop: 1 },
+    headerBtn: { marginLeft: 2 },
 
-    progressTrack: { height: 3, backgroundColor: p.border },
-    progressFill: { height: 3, backgroundColor: p.accent },
+    docCard: { marginHorizontal: 16, marginTop: 8, marginBottom: 4 },
+    docCardInner: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 12 },
+    docRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+    docBadge: {
+      backgroundColor: PAPER,
+      borderWidth: 3,
+      borderColor: INK,
+      borderRadius: 12,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      minWidth: 48,
+      alignItems: "center",
+    },
+    docBadgeText: { fontFamily: FONT_POSTER, fontSize: 14, color: INK, includeFontPadding: false },
+    docTitle: { fontFamily: FONT_BOLD, fontSize: 15, color: INK },
+    docSub: { fontFamily: FONT_BODY, fontSize: 12.5, color: INK, opacity: 0.8, marginTop: 1 },
+    docPct: { fontFamily: FONT_POSTER, fontSize: 22, color: INK, includeFontPadding: false, marginLeft: 4 },
+
+    progressTrack: {
+      marginTop: 10,
+      height: 14,
+      borderRadius: 8,
+      backgroundColor: PAPER,
+      borderWidth: 3,
+      borderColor: INK,
+      overflow: "hidden",
+    },
+    progressFill: { height: "100%", backgroundColor: YELLOW, borderRightWidth: 3, borderRightColor: INK },
 
     readerArea: { flex: 1 },
-    listContent: { paddingVertical: 10, paddingBottom: 28 },
+    readerCard: { flex: 1, marginHorizontal: 16, marginTop: 10, marginBottom: 12 },
+    listContent: { paddingVertical: 12, paddingBottom: 30 },
 
-    emptyWrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 32 },
-    emptyEmoji: { fontSize: 52, marginBottom: 14 },
-    emptyTitle: { color: p.text, fontSize: 22, fontWeight: "800", marginBottom: 10, textAlign: "center" },
-    emptyText: { color: p.dim, fontSize: 15, lineHeight: 22, textAlign: "center", marginBottom: 22 },
-    primaryBtn: { backgroundColor: p.accent, paddingHorizontal: 26, paddingVertical: 14, borderRadius: 28 },
-    primaryBtnText: { color: p.onAccent, fontSize: 16, fontWeight: "700" },
-    emptyHint: { color: p.dim, fontSize: 12.5, textAlign: "center", marginTop: 18, lineHeight: 18 },
+    emptyScroll: { paddingHorizontal: 18, paddingTop: 18, paddingBottom: 30, flexGrow: 1, justifyContent: "center" },
+    emptyCard: { alignItems: "center", paddingHorizontal: 20, paddingVertical: 26 },
+    emptyEmoji: { fontSize: 60, marginBottom: 10 },
+    emptyText: { color: p.dim, fontSize: 16, lineHeight: 23, textAlign: "center", marginTop: 12, fontFamily: FONT_BODY },
+    kindRow: { flexDirection: "row", gap: 8, marginTop: 16, flexWrap: "wrap", justifyContent: "center" },
+    kindSticker: { borderWidth: 3, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, transform: [{ rotate: "-2deg" }] },
+    kindStickerText: { fontFamily: FONT_POSTER, fontSize: 14, color: INK, includeFontPadding: false },
+
+    tipCard: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
+    tipEmoji: { fontSize: 26 },
+    tipText: { flex: 1, color: INK, fontSize: 14.5, lineHeight: 20, fontFamily: FONT_BODY },
 
     loadingOverlay: {
       ...StyleSheet.absoluteFillObject,
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: p.bg + "E6",
+      backgroundColor: p.bg + "CC",
+      paddingHorizontal: 32,
     },
-    loadingText: { color: p.text, fontSize: 15, fontWeight: "600", marginTop: 14 },
-    loadingSub: { color: p.dim, fontSize: 12.5, marginTop: 6, maxWidth: "80%" },
+    loadingCard: { alignItems: "center", paddingHorizontal: 26, paddingVertical: 24, minWidth: 240 },
+    loadingText: { color: INK, fontSize: 15, fontFamily: FONT_BOLD, marginTop: 4 },
+    loadingSub: { color: INK, opacity: 0.75, fontSize: 12.5, marginTop: 6, maxWidth: 220, fontFamily: FONT_BODY },
 
+    transportWrap: { marginHorizontal: 16 },
     transport: {
       flexDirection: "row",
-      alignItems: "center",
+      alignItems: "flex-end",
       justifyContent: "space-around",
-      paddingTop: 10,
-      backgroundColor: p.surface,
-      borderTopWidth: 1,
-      borderTopColor: p.border,
+      paddingHorizontal: 10,
+      paddingTop: 12,
+      paddingBottom: 10,
     },
-    tBtn: { alignItems: "center", justifyContent: "center", minWidth: 56, paddingVertical: 4 },
-    tIcon: { color: p.text, fontSize: 22 },
-    tLabel: { color: p.dim, fontSize: 10.5, marginTop: 3 },
-    tDisabled: { opacity: 0.32 },
+    tItem: { alignItems: "center", justifyContent: "flex-end", minWidth: 60 },
+    tLabel: { color: p.dim, fontSize: 11.5, marginTop: 8, fontFamily: FONT_BOLD },
 
-    playBtn: {
-      width: 64,
-      height: 64,
-      borderRadius: 32,
-      backgroundColor: p.accent,
-      alignItems: "center",
-      justifyContent: "center",
-      marginTop: -6,
-    },
-    playIcon: { color: p.onAccent, fontSize: 24, fontWeight: "900" },
+    speedPill: { paddingHorizontal: 10, height: 48, minWidth: 64, alignItems: "center", justifyContent: "center" },
+    speedText: { color: INK, fontSize: 15, fontFamily: FONT_POSTER, includeFontPadding: false, letterSpacing: 0.5 },
 
-    speedPill: { alignItems: "center", justifyContent: "center", minWidth: 56, paddingVertical: 4 },
-    speedText: { color: p.text, fontSize: 16, fontWeight: "800" },
+    backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#17161A99" },
+    sheetWrap: { position: "absolute", left: 12, right: 12, maxHeight: "88%" },
+    sheet: { paddingHorizontal: 18, paddingTop: 16, paddingBottom: 18 },
+    sheetHead: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
+    sheetEmoji: { fontSize: 26 },
+    sheetLabel: { color: p.text, fontSize: 14, marginTop: 16, marginBottom: 10, fontFamily: FONT_BOLD },
 
-    backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#00000080" },
-    sheet: {
-      position: "absolute",
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: p.surface,
-      borderTopLeftRadius: 20,
-      borderTopRightRadius: 20,
-      paddingHorizontal: 20,
-      paddingTop: 8,
-      paddingBottom: 30,
-    },
-    sheetHandle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: p.border, marginBottom: 14 },
-    sheetTitle: { color: p.text, fontSize: 18, fontWeight: "800", marginBottom: 16 },
-    sheetLabel: { color: p.dim, fontSize: 13, marginTop: 14, marginBottom: 8, fontWeight: "600" },
-
-    segmented: { flexDirection: "row", backgroundColor: p.surface2, borderRadius: 12, padding: 4 },
-    segItem: { flex: 1, paddingVertical: 10, borderRadius: 9, alignItems: "center" },
-    segItemActive: { backgroundColor: p.accent },
-    segText: { color: p.text, fontWeight: "600", fontSize: 14 },
-    segTextActive: { color: p.onAccent, fontWeight: "800" },
+    chipRow: { flexDirection: "row", gap: 10, flexWrap: "wrap" },
 
     fontRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-    fontBtn: { backgroundColor: p.surface2, borderRadius: 12, paddingHorizontal: 22, paddingVertical: 12, minWidth: 72, alignItems: "center" },
-    fontBtnText: { color: p.text, fontSize: 18, fontWeight: "800" },
-    fontPreview: { color: p.text, fontSize: 16, fontWeight: "700" },
+    fontPreviewWrap: { alignItems: "center", flex: 1 },
+    fontPreview: { color: p.text, fontFamily: FONT_BOLD, includeFontPadding: false },
+    fontPreviewMeta: { color: p.dim, fontSize: 12, fontFamily: FONT_BODY, marginTop: 2 },
 
-    sheetClose: { marginTop: 22, backgroundColor: p.accent, borderRadius: 14, paddingVertical: 14, alignItems: "center" },
-    sheetCloseText: { color: p.onAccent, fontSize: 16, fontWeight: "800" },
+    listItem: { marginBottom: 10, marginRight: 6 },
+    chapterRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 14 },
+    chapterText: { color: p.text, fontSize: 15, flex: 1, paddingRight: 10, fontFamily: FONT_BODY },
+    chapterMeta: { color: p.dim, fontSize: 12, fontFamily: FONT_BOLD },
 
-    chapterRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 14, paddingHorizontal: 12, borderRadius: 10 },
-    chapterText: { color: p.text, fontSize: 15, flex: 1, paddingRight: 10 },
-    chapterMeta: { color: p.dim, fontSize: 12 },
-
-    rowSelect: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: p.surface2, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14 },
-    rowSelectText: { color: p.text, fontSize: 15, fontWeight: "600", flex: 1, paddingRight: 10 },
-    rowSelectChevron: { color: p.dim, fontSize: 22, marginTop: -2 },
-    voiceHint: { color: p.dim, fontSize: 12.5, lineHeight: 18, marginTop: 4 },
-    voiceMeta: { color: p.dim, fontSize: 11.5, marginTop: 2 },
-    voiceCheck: { color: p.accent, fontSize: 18, fontWeight: "800" },
+    rowSelect: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
+    rowSelectEmoji: { fontSize: 20 },
+    rowSelectText: { color: p.text, fontSize: 15, fontFamily: FONT_BOLD, flex: 1, paddingRight: 10 },
+    rowSelectChevron: { color: p.text, fontSize: 24, marginTop: -2, fontFamily: FONT_BOLD },
+    voiceHint: { color: p.dim, fontSize: 13, lineHeight: 18, marginTop: 4, fontFamily: FONT_BODY },
+    voiceMeta: { color: p.dim, fontSize: 11.5, marginTop: 2, fontFamily: FONT_BODY },
+    voiceCheck: { color: INK, fontSize: 18, fontFamily: FONT_BOLD },
   });
 }
