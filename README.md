@@ -73,6 +73,12 @@ The output APK is at `android/app/build/outputs/apk/release/app-release.apk`.
 ### Voices
 LeggiMi reads with the phone's language by default. To choose or add a voice: **Aa → Voice**. Voices are listed as “Language · code” with the phone's language first; tap one to hear a short preview, your choice is saved automatically. Use **“Install more voices…”** to download additional / higher‑quality voices from Android's text‑to‑speech settings.
 
+## Support
+
+If this saved you an argument about who forgot the water bill:
+
+[![Support me on PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=T4SKREGYTG5ES)
+
 ## Tech stack
 
 React Native 0.83 (New Architecture / Fabric, Hermes) · react-native-tts · pdf.js · JSZip · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-safe-area-context. Fonts: [Luckiest Guy](https://fonts.google.com/specimen/Luckiest+Guy) and [Comic Neue](https://fonts.google.com/specimen/Comic+Neue) (OFL), bundled in `android/app/src/main/assets/fonts/`.
