@@ -78,7 +78,7 @@ class LeggiMiPrintService : PrintService() {
             try {
                 val dir = File(cacheDir, "print").apply { mkdirs() }
                 val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val safe = label.replace(Regex("[^\w.\- ]+"), "_").take(60)
+                val safe = label.replace(Regex("[^A-Za-z0-9_. -]+"), "_").take(60)
                 val out = File(dir, "Print - $safe ($stamp).pdf")
                 FileInputStream(pfd.fileDescriptor).use { input ->
                     FileOutputStream(out).use { output -> input.copyTo(output) }
