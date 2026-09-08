@@ -39,5 +39,28 @@
 			android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
 			android:value="com.reactnative.googlecast.GoogleCastOptionsProvider" />
       </activity>
+
+      <!-- Virtual printer: "print" from any app to have it read aloud -->
+      <service
+        android:name=".print.LeggiMiPrintService"
+        android:permission="android.permission.BIND_PRINT_SERVICE"
+        android:exported="true">
+        <intent-filter>
+          <action android:name="android.printservice.PrintService" />
+        </intent-filter>
+        <meta-data
+          android:name="android.printservice"
+          android:resource="@xml/print_service" />
+      </service>
+
+      <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.leggimi.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+        <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/leggimi_paths" />
+      </provider>
     </application>
 </manifest>

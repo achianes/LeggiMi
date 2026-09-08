@@ -13,6 +13,7 @@ import {
   useColorScheme,
   NativeModules,
   AppState,
+  Linking,
   StyleProp,
   ViewStyle,
   TextStyle,
@@ -27,8 +28,25 @@ import JSZip from "jszip";
 import { WebView } from "react-native-webview";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Slider from "@react-native-community/slider";
+import TextRecognition from "@react-native-ml-kit/text-recognition";
 
-type Picked = { name: string; uri: string; type?: string | null };
+type DocKind = "pdf" | "docx" | "txt" | "md" | "rtf" | "image" | "text" | "print" | "other";
+type DocSource = "picker" | "share" | "print";
+type Picked = { name: string; uri: string; type?: string | null; kind?: DocKind; ocr?: boolean };
+/** One row of the Library (history): what was opened, how far you got. */
+type LibraryEntry = {
+  id: string; // same key used for progress:<id>
+  name: string;
+  kind: DocKind;
+  source: DocSource;
+  addedAt: number;
+  lastOpenedAt: number;
+  total: number;
+  index: number;
+  ocr: boolean;
+  markdown: boolean;
+  textPath: string; // cached clean text, so reopening is instant (and OCR runs once)
+};
 type Chapter = { title: string; startIndex: number; endIndex: number };
 type ThemeName = "dark" | "light" | "sepia";
 type Voice = { id: string; name?: string; language?: string; quality?: number; latency?: number; networkConnectionRequired?: boolean; notInstalled?: boolean };
@@ -425,6 +443,99 @@ async function saveProgress(fid: string, idx: number) {
   await AsyncStorage.setItem(`progress:${fid}`, String(idx));
 }
 
+// ---- Library (history) ------------------------------------------------------
+const LIBRARY_KEY = "library:v1";
+const LIBRARY_DIR = `${RNFS.DocumentDirectoryPath}/library`;
+const LIBRARY_MAX = 200;
+const IMAGE_EXTS = ["jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif", "tif", "tiff"];
+
+function hashStr(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(16);
+}
+function kindOf(name: string, mime: string | null | undefined, source: DocSource): DocKind {
+  if (source === "print") return "print";
+  const ext = extOf(name);
+  const m = (mime ?? "").toLowerCase();
+  if (ext === "pdf" || m === "application/pdf") return "pdf";
+  if (ext === "docx" || ext === "doc" || m.includes("wordprocessingml")) return "docx";
+  if (ext === "md" || ext === "markdown" || m.includes("markdown")) return "md";
+  if (ext === "rtf" || m.includes("rtf")) return "rtf";
+  if (IMAGE_EXTS.includes(ext) || m.startsWith("image/")) return "image";
+  if (ext === "txt" || m.startsWith("text/") || isTextLikeExt(ext)) return "txt";
+  return "other";
+}
+function kindEmoji(k: DocKind) {
+  switch (k) {
+    case "pdf": return "📕";
+    case "docx": return "📘";
+    case "md": return "📝";
+    case "rtf": return "📄";
+    case "image": return "🖼️";
+    case "text": return "💬";
+    case "print": return "🖨️";
+    case "txt": return "📄";
+    default: return "📎";
+  }
+}
+function kindColor(k: DocKind) {
+  switch (k) {
+    case "pdf": return CORAL;
+    case "docx": return SKY;
+    case "md": return TANGERINE;
+    case "rtf": return GRAPE;
+    case "image": return BUBBLEGUM;
+    case "text": return AQUA;
+    case "print": return YELLOW;
+    default: return MINT;
+  }
+}
+function kindLabel(k: DocKind) {
+  switch (k) {
+    case "docx": return "DOC";
+    case "image": return "IMG";
+    case "text": return "TXT";
+    case "print": return "PRNT";
+    case "other": return "FILE";
+    default: return k.toUpperCase();
+  }
+}
+async function loadLibrary(): Promise<LibraryEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(LIBRARY_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((e) => e && typeof e.id === "string") : [];
+  } catch { return []; }
+}
+async function persistLibrary(list: LibraryEntry[]) {
+  await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(list.slice(0, LIBRARY_MAX)));
+}
+function fmtDate(ts: number) {
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const hh = `${d.getHours()}`.padStart(2, "0");
+  const mm = `${d.getMinutes()}`.padStart(2, "0");
+  if (sameDay) return `today ${hh}:${mm}`;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const year = d.getFullYear() === now.getFullYear() ? "" : ` ${d.getFullYear()}`;
+  return `${d.getDate()} ${months[d.getMonth()]}${year}`;
+}
+
+// ---- OCR (Google ML Kit, on device) ----------------------------------------
+function ocrAvailable() {
+  return !!(NativeModules as any)?.TextRecognition;
+}
+async function ocrImageFile(path: string): Promise<string> {
+  const url = /^(file|content):\/\//.test(path) ? path : `file://${path}`;
+  const res: any = await TextRecognition.recognize(url);
+  const blocks: string[] = (res?.blocks || [])
+    .map((b: any) => (b?.lines || []).map((l: any) => String(l?.text || "").trim()).filter(Boolean).join("\n"))
+    .filter(Boolean);
+  return blocks.length ? blocks.join("\n\n") : String(res?.text || "");
+}
+
 /**
  * PDF extraction offline: pdf.js letto da assets (android/app/src/main/assets/pdfjs/pdf.min.mjs)
  */
@@ -496,8 +607,34 @@ const pdfJsHtmlOffline = (pdfBase64: string) => {
       full += lines.join("\\n") + "\\n\\n";
     }
 
+    // OCR support: the app can ask for page bitmaps one at a time
+    // (window.__renderPage(n) via injectJavaScript) when the PDF has no text.
+    window.__renderPage = async (n) => {
+      try {
+        const page = await pdf.getPage(n);
+        const vp0 = page.getViewport({ scale: 1 });
+        const scale = Math.min(2.4, Math.max(1.3, 1600 / Math.max(vp0.width, vp0.height)));
+        const vp = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(vp.width);
+        canvas.height = Math.ceil(vp.height);
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.88);
+        window.ReactNativeWebView.postMessage(
+          JSON.stringify({ type: "page", page: n, total: pdf.numPages, jpeg: dataUrl.split(",")[1] })
+        );
+      } catch (e) {
+        window.ReactNativeWebView.postMessage(
+          JSON.stringify({ type: "pageError", page: n, error: String(e) })
+        );
+      }
+    };
+
     window.ReactNativeWebView.postMessage(
-      JSON.stringify({ ok: true, text: full.trim() })
+      JSON.stringify({ type: "text", ok: true, text: full.trim(), pages: pdf.numPages })
     );
   } catch (e) {
     window.ReactNativeWebView.postMessage(
@@ -944,6 +1081,19 @@ function AppInner() {
 
   const [pdfBase64, setPdfBase64] = useState<string | null>(null);
   const pendingAutoStartRef = useRef(false);
+  const webRef = useRef<WebView | null>(null);
+
+  // OCR of a scanned PDF: pages are rendered one at a time by the WebView
+  const [ocrState, setOcrState] = useState<{ page: number; total: number } | null>(null);
+  const ocrRef = useRef<{ fid: string; texts: string[]; total: number } | null>(null);
+
+  // Library (history of opened documents)
+  const [library, setLibrary] = useState<LibraryEntry[]>([]);
+  const libraryRef = useRef<LibraryEntry[]>([]);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const persistTimerRef = useRef<any>(null);
+  // what the document being opened is, for the library row
+  const currentMetaRef = useRef<{ name: string; kind: DocKind; source: DocSource; ocr: boolean } | null>(null);
 
   const [themeName, setThemeName] = useState<ThemeName>("light");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -1048,6 +1198,30 @@ function AppInner() {
     if (!settingsLoaded) return;
     AsyncStorage.setItem(SETTINGS_FONT_KEY, String(fontIndex)).catch(() => {});
   }, [fontIndex, settingsLoaded]);
+
+  // ====== LIBRARY ======
+  useEffect(() => {
+    loadLibrary().then((list) => {
+      libraryRef.current = list;
+      setLibrary(list);
+    });
+  }, []);
+
+  // keep the library row in step with the reading position (debounced)
+  useEffect(() => {
+    if (!fileId || !segments.length) return;
+    const list = libraryRef.current;
+    const i = list.findIndex((e) => e.id === fileId);
+    if (i < 0 || list[i].index === currentIdx) return;
+    const next = list.slice();
+    next[i] = { ...next[i], index: currentIdx, total: segments.length, lastOpenedAt: Date.now() };
+    libraryRef.current = next;
+    clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      setLibrary([...libraryRef.current]);
+      persistLibrary(libraryRef.current).catch(() => {});
+    }, 1200);
+  }, [currentIdx, fileId, segments.length]);
 
   // ====== TTS INIT ======
   useEffect(() => {
@@ -1336,7 +1510,142 @@ function AppInner() {
     const savedIdx = await loadProgress(fid);
     const clamped = Math.max(0, Math.min(savedIdx, Math.max(0, segs.length - 1)));
     setCurrentIdx(clamped);
+
+    // remember it in the Library, with the clean text cached for instant reopening
+    const meta = currentMetaRef.current;
+    if (meta && segs.length) {
+      try {
+        await RNFS.mkdir(LIBRARY_DIR);
+        const textPath = `${LIBRARY_DIR}/${hashStr(fid)}.txt`;
+        await RNFS.writeFile(textPath, cleaned, "utf8");
+        const now = Date.now();
+        const prev = libraryRef.current.find((e) => e.id === fid);
+        const entry: LibraryEntry = {
+          id: fid,
+          name: meta.name,
+          kind: meta.kind,
+          source: meta.source,
+          ocr: !!meta.ocr,
+          markdown: !!opts.markdown,
+          textPath,
+          total: segs.length,
+          index: clamped,
+          addedAt: prev?.addedAt ?? now,
+          lastOpenedAt: now,
+        };
+        const next = [entry, ...libraryRef.current.filter((e) => e.id !== fid)].slice(0, LIBRARY_MAX);
+        libraryRef.current = next;
+        setLibrary(next);
+        persistLibrary(next).catch(() => {});
+      } catch {}
+    }
     return clamped;
+  };
+
+  const removeFromLibrary = async (entry: LibraryEntry) => {
+    const next = libraryRef.current.filter((e) => e.id !== entry.id);
+    libraryRef.current = next;
+    setLibrary(next);
+    persistLibrary(next).catch(() => {});
+    RNFS.unlink(entry.textPath).catch(() => {});
+    AsyncStorage.removeItem(`progress:${entry.id}`).catch(() => {});
+  };
+
+  const clearLibrary = () => {
+    Alert.alert("Clear library", "Remove every document and its saved position?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Clear",
+        style: "destructive",
+        onPress: () => {
+          for (const e of libraryRef.current) {
+            RNFS.unlink(e.textPath).catch(() => {});
+            AsyncStorage.removeItem(`progress:${e.id}`).catch(() => {});
+          }
+          libraryRef.current = [];
+          setLibrary([]);
+          persistLibrary([]).catch(() => {});
+        },
+      },
+    ]);
+  };
+
+  // Reopen a document from the Library: the clean text is cached, so no
+  // extraction (or OCR) is needed again.
+  const openFromLibrary = async (entry: LibraryEntry) => {
+    setLibraryOpen(false);
+    setIsExtracting(true);
+    await hardStop();
+    setSegments([]);
+    segmentsRef.current = [];
+    setChapters([]);
+    setRawText("");
+    setPicked({ name: entry.name, uri: "", type: null, kind: entry.kind, ocr: entry.ocr });
+    setFileId(entry.id);
+    fileIdRef.current = entry.id;
+    currentMetaRef.current = { name: entry.name, kind: entry.kind, source: entry.source, ocr: entry.ocr };
+    try {
+      const text = await RNFS.readFile(entry.textPath, "utf8");
+      const start = await applyTextForCurrentFile(entry.id, text, { markdown: entry.markdown });
+      setIsExtracting(false);
+      setTimeout(() => scrollToIndexSafe(start, 0.32), 250);
+    } catch {
+      setIsExtracting(false);
+      setPicked(null);
+      Alert.alert("Library", "The saved copy of this document is gone. Open it again from its app.");
+      removeFromLibrary(entry);
+    }
+  };
+
+  const confirmAsync = (title: string, message: string, okText = "OK", cancelText = "Cancel") =>
+    new Promise<boolean>((resolve) => {
+      Alert.alert(
+        title,
+        message,
+        [
+          { text: cancelText, style: "cancel", onPress: () => resolve(false) },
+          { text: okText, onPress: () => resolve(true) },
+        ],
+        { cancelable: true, onDismiss: () => resolve(false) }
+      );
+    });
+
+  // An image (photo of a page, screenshot...) has no text: offer OCR.
+  const openImageWithOcr = async (fid: string, name: string, localPath: string, autoStart: boolean) => {
+    setIsExtracting(false);
+    const ok = await confirmAsync(
+      "This is an image, not text",
+      "LeggiMi can recognise the text in it right on the phone (OCR, no internet). Run it now?",
+      "Run OCR"
+    );
+    if (!ok) { setPicked(null); return; }
+    if (!ocrAvailable()) {
+      Alert.alert("OCR", "This build has no OCR module. Install the latest LeggiMi build to read images.");
+      setPicked(null);
+      return;
+    }
+    setIsExtracting(true);
+    setOcrState({ page: 1, total: 1 });
+    try {
+      const text = await ocrImageFile(localPath);
+      setOcrState(null);
+      if (!text.trim()) {
+        setIsExtracting(false);
+        setPicked(null);
+        Alert.alert("OCR", "No readable text was found in this image.");
+        return;
+      }
+      if (currentMetaRef.current) currentMetaRef.current.ocr = true;
+      setPicked((p) => (p ? { ...p, ocr: true } : p));
+      const start = await applyTextForCurrentFile(fid, text, { extracted: true });
+      setIsExtracting(false);
+      if (autoStart) setTimeout(() => speakFrom(start), 200);
+    } catch (err: any) {
+      setOcrState(null);
+      setIsExtracting(false);
+      setPicked(null);
+      Alert.alert("OCR", String(err?.message ?? err ?? "Text recognition failed"));
+    }
   };
 
   const openFileFromUri = async (
@@ -1353,7 +1662,11 @@ function AppInner() {
     setChapters([]);
     setRawText("");
 
-    setPicked({ name, uri, type: mime ?? "" });
+    const fromPrint = fromShare && (uri.includes("leggimi.fileprovider") || /^Print - /.test(name));
+    const source: DocSource = fromPrint ? "print" : fromShare ? "share" : "picker";
+    const kind = kindOf(name, mime, source);
+    currentMetaRef.current = { name, kind, source, ocr: false };
+    setPicked({ name, uri, type: mime ?? "", kind });
     const fid = makeFileId(name, mime ?? "");
     setFileId(fid);
 
@@ -1404,7 +1717,12 @@ function AppInner() {
         const b64 = await RNFS.readFile(localPath, "base64");
         pendingAutoStartRef.current = autoStart;
         setPdfBase64(b64);
-        return; // isExtracting resta true finché la WebView risponde
+        return; // isExtracting stays true until the WebView answers
+      }
+
+      if (IMAGE_EXTS.includes(ext) || (mime ?? "").startsWith("image/")) {
+        await openImageWithOcr(fid, name, localPath, autoStart);
+        return;
       }
 
       try {
@@ -1432,7 +1750,8 @@ function AppInner() {
     segmentsRef.current = [];
     setChapters([]);
     setRawText("");
-    setPicked({ name: title, uri: "", type: "text/plain" });
+    setPicked({ name: title, uri: "", type: "text/plain", kind: "text" });
+    currentMetaRef.current = { name: title, kind: "text", source: "share", ocr: false };
     // stable id from the content so progress is kept if the same text comes back
     let h = 0;
     for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
@@ -1539,10 +1858,14 @@ function AppInner() {
     const sub = AppState.addEventListener("change", (st) => {
       if (st === "active") poll("appstate");
     });
+    // Android only: the activity regains focus after the share sheet closes,
+    // even when the app never left the foreground (split screen, popups).
+    const subFocus = (AppState as any).addEventListener?.("focus", () => poll("focus"));
     return () => {
       cancelled = true;
       timers.forEach(clearTimeout);
       sub.remove();
+      subFocus?.remove?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1564,14 +1887,16 @@ function AppInner() {
   const busy = isExtracting;
   const hasDoc = segments.length > 0;
 
-  const docKindColor = (() => {
-    const ext = extOf(picked?.name ?? "");
-    if (ext === "pdf") return CORAL;
-    if (ext === "docx" || ext === "doc") return SKY;
-    if (ext === "rtf") return GRAPE;
-    if (ext === "md" || ext === "markdown") return TANGERINE;
-    return MINT;
-  })();
+  const docKind: DocKind = picked?.kind ?? kindOf(picked?.name ?? "", picked?.type, "picker");
+  const docKindColor = kindColor(docKind);
+
+  const openPrintSettings = async () => {
+    try {
+      await Linking.sendIntent("android.settings.ACTION_PRINT_SETTINGS");
+    } catch {
+      Alert.alert("Printing", "Open Android Settings › Connected devices › Printing and enable “LeggiMi (read aloud)”.");
+    }
+  };
 
   const sheetBottom = Math.max(12, insets.bottom + 8);
 
@@ -1583,6 +1908,7 @@ function AppInner() {
       <View style={s.header}>
         <PosterTitle text="LEGGIMI" palette={palette} size={30} style={{ flex: 1 }} />
         <ComicIconButton icon="📂" onPress={pickFile} disabled={busy} palette={palette} color={YELLOW} fontSize={20} style={s.headerBtn} />
+        <ComicIconButton icon="🕘" onPress={() => setLibraryOpen(true)} disabled={busy} palette={palette} color={TANGERINE} fontSize={20} style={s.headerBtn} />
         {chapters.length > 1 && (
           <ComicIconButton icon="☰" onPress={() => setChaptersOpen(true)} palette={palette} color={SKY} fontSize={20} style={s.headerBtn} />
         )}
@@ -1594,8 +1920,13 @@ function AppInner() {
         <ComicBox palette={palette} color={docKindColor} radius={18} style={s.docCard} onPress={goToCurrent} contentStyle={s.docCardInner}>
           <View style={s.docRow}>
             <View style={s.docBadge}>
-              <Text style={s.docBadgeText}>{(extOf(picked.name) || (picked.type === "text/plain" ? "txt" : "doc")).toUpperCase().slice(0, 4)}</Text>
+              <Text style={s.docBadgeText}>{kindLabel(docKind)}</Text>
             </View>
+            {picked.ocr ? (
+              <View style={[s.docBadge, { minWidth: 0, paddingHorizontal: 6 }]}>
+                <Text style={s.docBadgeText}>OCR</Text>
+              </View>
+            ) : null}
             <View style={{ flex: 1 }}>
               <Text numberOfLines={1} style={s.docTitle}>{picked.name}</Text>
               {hasDoc ? (
@@ -1638,12 +1969,33 @@ function AppInner() {
                 ))}
               </View>
               <ComicButton text="OPEN A DOCUMENT" icon="📂" onPress={pickFile} palette={palette} color={YELLOW} style={{ marginTop: 18 }} />
+              {library.length > 0 ? (
+                <ComicButton text={`LIBRARY · ${library.length}`} icon="🕘" onPress={() => setLibraryOpen(true)} palette={palette} color={TANGERINE} compact style={{ marginTop: 12 }} />
+              ) : null}
             </ComicBox>
 
             <ComicBox palette={palette} color={SKY} radius={20} style={{ marginTop: 26 }} contentStyle={s.tipCard}>
               <Text style={s.tipEmoji}>💡</Text>
               <Text style={s.tipText}>
                 In any app tap <Text style={{ fontFamily: FONT_BOLD }}>Share</Text> and pick LeggiMi: I start reading right away. Selected text works too.
+              </Text>
+            </ComicBox>
+
+            <ComicBox palette={palette} color={GRAPE} radius={20} style={{ marginTop: 16 }} contentStyle={s.tipCardCol}>
+              <View style={s.tipCard}>
+                <Text style={s.tipEmoji}>🖨️</Text>
+                <Text style={s.tipText}>
+                  No Share button? <Text style={{ fontFamily: FONT_BOLD }}>Print</Text> instead and choose the printer{" "}
+                  <Text style={{ fontFamily: FONT_BOLD }}>“LeggiMi (read aloud)”</Text>. Enable it once in Android's print settings.
+                </Text>
+              </View>
+              <ComicButton text="PRINT SETTINGS" onPress={openPrintSettings} palette={palette} color={palette.surface} compact style={{ alignSelf: "flex-start", marginTop: 8, marginLeft: 38 }} />
+            </ComicBox>
+
+            <ComicBox palette={palette} color={BUBBLEGUM} radius={20} style={{ marginTop: 16 }} contentStyle={s.tipCard}>
+              <Text style={s.tipEmoji}>🔍</Text>
+              <Text style={s.tipText}>
+                Photos, screenshots and scanned PDFs are read too: LeggiMi offers on‑device <Text style={{ fontFamily: FONT_BOLD }}>OCR</Text> when there is no text layer.
               </Text>
             </ComicBox>
           </ScrollView>
@@ -1675,8 +2027,10 @@ function AppInner() {
           <View style={s.loadingOverlay}>
             <ComicBox palette={palette} color={YELLOW} radius={22} shadow={6} contentStyle={s.loadingCard}>
               <ActivityIndicator size="large" color={INK} />
-              <PosterTitle text="ONE MOMENT…" palette={palette} size={22} color={INK} style={{ marginTop: 12 }} />
-              <Text style={s.loadingText}>Extracting the text</Text>
+              <PosterTitle text={ocrState ? "READING THE PIXELS…" : "ONE MOMENT…"} palette={palette} size={22} color={INK} style={{ marginTop: 12 }} />
+              <Text style={s.loadingText}>
+                {ocrState ? (ocrState.total > 1 ? `OCR · page ${ocrState.page} of ${ocrState.total}` : "OCR · recognising text") : "Extracting the text"}
+              </Text>
               {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
             </ComicBox>
           </View>
@@ -1873,9 +2227,58 @@ function AppInner() {
         </View>
       </Modal>
 
-      {/* PDF extractor offline (nascosto) */}
+      {/* SHEET LIBRARY (history) */}
+      <Modal visible={libraryOpen} transparent animationType="slide" onRequestClose={() => setLibraryOpen(false)}>
+        <Pressable style={s.backdrop} onPress={() => setLibraryOpen(false)} />
+        <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "86%" }]}>
+          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+            <View style={s.sheetHead}>
+              <Text style={s.sheetEmoji}>🕘</Text>
+              <PosterTitle text="LIBRARY" palette={palette} size={26} style={{ flex: 1 }} />
+              {library.length > 0 ? (
+                <ComicButton text="CLEAR" onPress={clearLibrary} palette={palette} color={palette.surface2} compact />
+              ) : null}
+            </View>
+            {library.length === 0 ? (
+              <Text style={s.voiceHint}>Everything you open, share or print to LeggiMi ends up here, with the point you reached. Nothing yet.</Text>
+            ) : (
+              <Text style={s.voiceHint}>Tap a document to pick up where you left off.</Text>
+            )}
+            <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+              {library.map((e) => {
+                const pctE = e.total ? Math.round(((e.index + 1) / e.total) * 100) : 0;
+                const done = e.total > 0 && e.index >= e.total - 1;
+                return (
+                  <ComicBox key={e.id} palette={palette} radius={16} stroke={2} shadow={3} onPress={() => openFromLibrary(e)} style={s.listItem} contentStyle={s.libRow}>
+                    <View style={[s.libIcon, { backgroundColor: kindColor(e.kind), borderColor: palette.ink }]}>
+                      <Text style={{ fontSize: 20 }}>{kindEmoji(e.kind)}</Text>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text numberOfLines={1} style={s.libName}>{e.name}</Text>
+                      <Text numberOfLines={1} style={s.libMeta}>
+                        {kindLabel(e.kind)}{e.ocr ? " · OCR" : ""} · {fmtDate(e.lastOpenedAt)} · {done ? "finished" : `block ${e.index + 1}/${e.total}`}
+                      </Text>
+                      <View style={[s.libTrack, { borderColor: palette.ink, backgroundColor: palette.surface }]}>
+                        <View style={[s.libFill, { width: `${Math.max(pctE, 2)}%`, backgroundColor: done ? MINT : YELLOW }]} />
+                      </View>
+                    </View>
+                    <View style={s.libRight}>
+                      <Text style={s.libPct}>{pctE}%</Text>
+                      <ComicIconButton icon="✕" onPress={() => removeFromLibrary(e)} palette={palette} color={palette.surface2} size={30} fontSize={13} />
+                    </View>
+                  </ComicBox>
+                );
+              })}
+            </ScrollView>
+            <ComicButton text="CLOSE" onPress={() => setLibraryOpen(false)} palette={palette} color={CORAL} style={{ marginTop: 14 }} />
+          </ComicBox>
+        </View>
+      </Modal>
+
+      {/* PDF extractor offline (hidden). Also renders pages for OCR on request. */}
       {pdfBase64 && (
         <WebView
+          ref={webRef}
           source={{ html: pdfJsHtmlOffline(pdfBase64), baseUrl: "file:///android_asset/" }}
           javaScriptEnabled
           originWhitelist={["*"]}
@@ -1884,31 +2287,101 @@ function AppInner() {
           allowUniversalAccessFromFileURLs
           mixedContentMode="always"
           onMessage={async (e) => {
-            try {
-              const msg = JSON.parse(e.nativeEvent.data);
-              if (msg.ok) {
-                const t = String(msg.text || "").trim();
-                if (!t) {
-                  Alert.alert("PDF", "This PDF has no text layer (scanned): it would need OCR.");
-                  return;
-                }
-                if (!fileId) throw new Error("missing fileId");
-                const start = await applyTextForCurrentFile(fileId, t, { extracted: true });
-                setIsExtracting(false);
-                setPdfBase64(null);
-                if (pendingAutoStartRef.current) {
-                  pendingAutoStartRef.current = false;
-                  setTimeout(() => speakFrom(start), 250);
-                }
-              } else {
-                Alert.alert("PDF", msg.error || "Could not extract text from the PDF");
-              }
-            } catch (err: any) {
-              Alert.alert("PDF", String(err?.message ?? "Could not parse the PDF"));
-            } finally {
+            let msg: any;
+            try { msg = JSON.parse(e.nativeEvent.data); } catch { return; }
+
+            const cleanup = () => {
               setIsExtracting(false);
               setPdfBase64(null);
+              setOcrState(null);
+              ocrRef.current = null;
               pendingAutoStartRef.current = false;
+            };
+            const finishOk = (start: number) => {
+              setIsExtracting(false);
+              setPdfBase64(null);
+              setOcrState(null);
+              ocrRef.current = null;
+              if (pendingAutoStartRef.current) {
+                pendingAutoStartRef.current = false;
+                setTimeout(() => speakFrom(start), 250);
+              }
+            };
+
+            // ---- one OCR page rendered by pdf.js
+            if (msg.type === "page" || msg.type === "pageError") {
+              const job = ocrRef.current;
+              if (!job) return;
+              const n = Number(msg.page) || 1;
+              if (msg.type === "page") {
+                const tmp = `${RNFS.CachesDirectoryPath}/ocr_${hashStr(job.fid)}_${n}.jpg`;
+                try {
+                  await RNFS.writeFile(tmp, String(msg.jpeg || ""), "base64");
+                  job.texts[n - 1] = await ocrImageFile(tmp);
+                } catch (err: any) {
+                  console.log("[ocr] page", n, String(err?.message ?? err));
+                  job.texts[n - 1] = "";
+                } finally {
+                  RNFS.unlink(tmp).catch(() => {});
+                }
+              } else {
+                job.texts[n - 1] = "";
+              }
+              if (n < job.total) {
+                setOcrState({ page: n + 1, total: job.total });
+                webRef.current?.injectJavaScript(`window.__renderPage(${n + 1}); true;`);
+                return;
+              }
+              const text = job.texts.join("\n\n").trim();
+              if (!text) {
+                Alert.alert("OCR", "No readable text was found in this PDF.");
+                setPicked(null);
+                cleanup();
+                return;
+              }
+              try {
+                if (currentMetaRef.current) currentMetaRef.current.ocr = true;
+                setPicked((p) => (p ? { ...p, ocr: true } : p));
+                const start = await applyTextForCurrentFile(job.fid, text, { extracted: true });
+                finishOk(start);
+              } catch (err: any) {
+                Alert.alert("OCR", String(err?.message ?? err ?? "Could not read the recognised text"));
+                cleanup();
+              }
+              return;
+            }
+
+            // ---- text layer result
+            try {
+              if (!msg.ok) throw new Error(msg.error || "Could not extract text from the PDF");
+              const fid = fileIdRef.current;
+              if (!fid) throw new Error("missing fileId");
+              const t = String(msg.text || "").trim();
+              const pages = Math.max(1, Number(msg.pages) || 1);
+              const scanned = t.replace(/\s+/g, "").length < 40 * pages;
+              if (scanned) {
+                const ok = await confirmAsync(
+                  "Scanned PDF",
+                  `This PDF has ${t ? "almost " : ""}no text: it is made of images. Recognise the text on the phone (OCR) on ${pages} page${pages > 1 ? "s" : ""}?`,
+                  "Run OCR"
+                );
+                if (!ok) { setPicked(null); cleanup(); return; }
+                if (!ocrAvailable()) {
+                  Alert.alert("OCR", "This build has no OCR module. Install the latest LeggiMi build to read scanned PDFs.");
+                  setPicked(null);
+                  cleanup();
+                  return;
+                }
+                ocrRef.current = { fid, texts: new Array(pages).fill(""), total: pages };
+                setOcrState({ page: 1, total: pages });
+                webRef.current?.injectJavaScript("window.__renderPage(1); true;");
+                return; // keep the WebView alive for the page renders
+              }
+              const start = await applyTextForCurrentFile(fid, t, { extracted: true });
+              finishOk(start);
+            } catch (err: any) {
+              Alert.alert("PDF", String(err?.message ?? "Could not parse the PDF"));
+              cleanup();
             }
           }}
           onError={(e) => {
@@ -1916,6 +2389,8 @@ function AppInner() {
             Alert.alert("PDF", "The PDF reader failed while extracting text");
             setIsExtracting(false);
             setPdfBase64(null);
+            setOcrState(null);
+            ocrRef.current = null;
             pendingAutoStartRef.current = false;
           }}
           style={{ width: 0, height: 0, opacity: 0, position: "absolute" }}
@@ -1989,6 +2464,16 @@ function makeStyles(p: Palette) {
     kindStickerText: { fontFamily: FONT_POSTER, fontSize: 14, color: INK, includeFontPadding: false },
 
     tipCard: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
+    tipCardCol: { paddingBottom: 12 },
+
+    libRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, paddingHorizontal: 12, gap: 10 },
+    libIcon: { width: 44, height: 44, borderRadius: 14, borderWidth: 3, alignItems: "center", justifyContent: "center" },
+    libName: { color: p.text, fontSize: 15, fontFamily: FONT_BOLD },
+    libMeta: { color: p.dim, fontSize: 12, fontFamily: FONT_BODY, marginTop: 1 },
+    libTrack: { marginTop: 6, height: 8, borderRadius: 5, borderWidth: 2, overflow: "hidden" },
+    libFill: { height: "100%" },
+    libRight: { alignItems: "center", gap: 6, marginLeft: 2 },
+    libPct: { color: p.text, fontFamily: FONT_POSTER, fontSize: 15, includeFontPadding: false },
     tipEmoji: { fontSize: 26 },
     tipText: { flex: 1, color: INK, fontSize: 14.5, lineHeight: 20, fontFamily: FONT_BODY },
 
