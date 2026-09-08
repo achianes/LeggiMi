@@ -1,6 +1,12 @@
 package com.leggimimobile.print
 
+import android.app.ActivityManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.print.PrintAttributes
@@ -111,7 +117,83 @@ class LeggiMiPrintService : PrintService() {
             putExtra(EXTRA_FROM_PRINT, true)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(intent)
+        // Android 10+ blocks activity starts from a background service
+        // ("Background activity launch blocked"). So:
+        //  1. leave a note the app reads on its next start/resume (always works),
+        //  2. post a tap-to-open notification (needs POST_NOTIFICATIONS on 13+),
+        //  3. start the activity directly only when the app is already visible.
+        writePendingNote(file)
+        if (isAppInForeground()) {
+            try { startActivity(intent); return } catch (e: Exception) { Log.w(TAG, "startActivity failed", e) }
+        }
+        notifyReady(file, intent)
+    }
+
+    private fun writePendingNote(file: File) {
+        try {
+            val note = File(File(cacheDir, "print"), PENDING_FILE)
+            val json = "{\"path\":" + jsonString(file.absolutePath) +
+                ",\"name\":" + jsonString(file.name) +
+                ",\"time\":" + System.currentTimeMillis() + "}"
+            note.writeText(json)
+        } catch (e: Exception) {
+            Log.w(TAG, "pending note failed", e)
+        }
+    }
+
+    private fun jsonString(v: String): String {
+        val bs = 92.toChar()
+        val q = 34.toChar()
+        val sb = StringBuilder().append(q)
+        for (c in v) {
+            when (c) {
+                q -> sb.append(bs).append(q)
+                bs -> sb.append(bs).append(bs)
+                10.toChar() -> sb.append(bs).append('n')
+                13.toChar() -> sb.append(bs).append('r')
+                else -> sb.append(c)
+            }
+        }
+        return sb.append(q).toString()
+    }
+
+    private fun isAppInForeground(): Boolean {
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val procs = am.runningAppProcesses ?: return false
+        return procs.any {
+            it.processName == packageName &&
+                it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+        }
+    }
+
+    private fun notifyReady(file: File, intent: Intent) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(CHANNEL_ID, "Printed documents", NotificationManager.IMPORTANCE_HIGH)
+                channel.description = "A document printed to LeggiMi is ready to be read aloud"
+                nm.createNotificationChannel(channel)
+            }
+            val reqCode = (System.currentTimeMillis() and 0xffffff).toInt()
+            val pi = PendingIntent.getActivity(
+                this, reqCode, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val title = file.nameWithoutExtension.removePrefix("Print - ")
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                Notification.Builder(this, CHANNEL_ID) else @Suppress("DEPRECATION") Notification.Builder(this)
+            val n = builder
+                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle("Ready to read: $title")
+                .setContentText("Tap to listen in LeggiMi")
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .setPriority(Notification.PRIORITY_HIGH)
+                .build()
+            nm.notify(reqCode, n)
+        } catch (e: Exception) {
+            Log.w(TAG, "notification failed", e)
+        }
     }
 
     companion object {
@@ -119,5 +201,7 @@ class LeggiMiPrintService : PrintService() {
         private const val PRINTER_LOCAL_ID = "leggimi-reader"
         private const val PRINTER_NAME = "LeggiMi (read aloud)"
         const val EXTRA_FROM_PRINT = "com.leggimimobile.FROM_PRINT"
+        const val CHANNEL_ID = "leggimi_print"
+        const val PENDING_FILE = "pending.json"
     }
 }

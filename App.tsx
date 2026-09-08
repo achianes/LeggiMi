@@ -14,6 +14,8 @@ import {
   NativeModules,
   AppState,
   Linking,
+  PermissionsAndroid,
+  Platform,
   StyleProp,
   ViewStyle,
   TextStyle,
@@ -1835,8 +1837,34 @@ function AppInner() {
         }
     };
 
+    // A document printed to the "LeggiMi" printer while the app was not
+    // visible: the print service leaves cache/print/pending.json because Android
+    // forbids it to open the app from the background.
+    const checkPendingPrint = async () => {
+      const note = `${RNFS.CachesDirectoryPath}/print/pending.json`;
+      try {
+        if (!(await RNFS.exists(note))) return;
+        const raw = await RNFS.readFile(note, "utf8");
+        await RNFS.unlink(note).catch(() => {});
+        const info = JSON.parse(raw);
+        const path = String(info?.path || "");
+        const name = String(info?.name || "Printed document.pdf");
+        if (!path || !(await RNFS.exists(path))) return;
+        if (processingShareRef.current) return;
+        processingShareRef.current = true;
+        try {
+          await openFileFromUri(name, `file://${path}`, "application/pdf", true, true);
+        } finally {
+          processingShareRef.current = false;
+        }
+      } catch (e: any) {
+        console.log("[print] pending note error", String(e?.message ?? e));
+      }
+    };
+
     const poll = (reason: string) => {
       if (cancelled) return;
+      checkPendingPrint();
       if (!native?.getFileNames) {
         console.log("[share] native module missing");
         return;
@@ -1893,7 +1921,30 @@ function AppInner() {
   const docKind: DocKind = picked?.kind ?? kindOf(picked?.name ?? "", picked?.type, "picker");
   const docKindColor = kindColor(docKind);
 
+  // Android 13+: the print service can only wave at you with a notification
+  const askNotificationPermission = async () => {
+    try {
+      if (Platform.OS !== "android" || Platform.Version < 33) return;
+      const perm = "android.permission.POST_NOTIFICATIONS" as any;
+      const has = await PermissionsAndroid.check(perm);
+      if (!has) await PermissionsAndroid.request(perm);
+    } catch {}
+  };
+
+  // ask once at first start, so "print to LeggiMi" can notify right away
+  useEffect(() => {
+    (async () => {
+      try {
+        if (await AsyncStorage.getItem("settings:notifAsked")) return;
+        await AsyncStorage.setItem("settings:notifAsked", "1");
+        await askNotificationPermission();
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openPrintSettings = async () => {
+    await askNotificationPermission();
     try {
       await Linking.sendIntent("android.settings.ACTION_PRINT_SETTINGS");
     } catch {
