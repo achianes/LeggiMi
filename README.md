@@ -2,13 +2,24 @@
 
 **Listen to your documents.** LeggiMi is an offline text‑to‑speech reader for Android: open (or *share*) a PDF, Word, Markdown, TXT or RTF file — or plain text from any app — and it reads it aloud, highlighting each block as it goes — like karaoke for documents. It wears the same comic look as its sibling app *Pay & Plan*.
 
-<p align="center">
-  <img src="docs/home.png" alt="LeggiMi home screen" width="260" />
-  <img src="docs/reader.png" alt="Reading a PDF" width="260" />
-  <img src="docs/markdown.png" alt="Shared Markdown text" width="260" />
-</p>
+## What it looks like
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/home.png" width="230"><br><sub><b>Home</b> — open, share, print or pick from the Library</sub></td>
+    <td align="center"><img src="docs/reader.png" width="230"><br><sub><b>Reading a PDF</b> — the block being spoken is a yellow sticker</sub></td>
+    <td align="center"><img src="docs/markdown.png" width="230"><br><sub><b>Shared text</b> — Markdown headings, lists and quotes rendered</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/library.png" width="230"><br><sub><b>Library</b> — everything you opened, with progress</sub></td>
+    <td align="center"><img src="docs/resume.png" width="230"><br><sub><b>Resume</b> — reopened from the Library at block 36/1716</sub></td>
+    <td></td>
+  </tr>
+</table>
 
 ## Features
+
+**New:** print to LeggiMi from apps without a Share button · on‑device OCR for photos and scanned PDFs · a Library that remembers where you stopped.
 
 - **Reads many formats** — PDF, DOCX (Word), RTF, TXT, Markdown and other plain‑text files.
 - **Share from any app** — send a file, or just selected text, to LeggiMi from another app and it opens and starts reading automatically.
@@ -78,7 +89,7 @@ The output APK is at `android/app/build/outputs/apk/release/app-release.apk`.
 5. **🕘** opens the Library: your history with progress bars; tap a row to resume, ✕ to forget it.
 
 ### Printing to LeggiMi
-From any app choose **Print**, then select the printer **LeggiMi (read aloud)**. The first time, enable the service: Android Settings › Connected devices › Connection preferences › Printing › LeggiMi (the **Print settings** button on the home screen takes you there).
+From any app choose **Print**, then select the printer **LeggiMi (read aloud)**. The first time, enable the service: Android Settings › Connected devices › Connection preferences › Printing › LeggiMi (the **Print settings** button on the home screen takes you there). Android does not let a print service open an app on its own, so LeggiMi posts a **“Ready to read”** notification you can tap — or simply open LeggiMi and the printed document starts by itself.
 
 ### OCR
 Open or share a photo / screenshot / scanned PDF: LeggiMi tells you there is no text and asks whether to run OCR. Recognition happens on the phone; the text is then read and cached in the Library.
