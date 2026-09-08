@@ -234,11 +234,14 @@ function postCleanExtractedText(raw: string) {
       const prev = merged[j];
       const startsLower = /^[a-zà-öø-ÿ]/.test(l);
       const prevOpen = !TERMINAL.test(prev);
+      // a long line ending mid-sentence (lowercase letter or comma) continues
+      // even across a page break, whatever the next line starts with
+      const prevMidSentence = prevOpen && prev.length > 40 && /[a-zà-öø-ÿ,;]$/.test(prev);
       const canJoin =
         !OWN_LINE.test(l) &&
         !isChapterHeading(prev) &&
         !isChapterHeading(l) &&
-        (startsLower || (prevOpen && blanks === 0));
+        (startsLower || (prevOpen && blanks === 0) || prevMidSentence);
       if (canJoin) {
         merged.length = j + 1;
         merged[j] = prev + " " + l;
