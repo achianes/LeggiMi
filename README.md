@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon/icon-192.png" width="120" alt="LeggiMi icon"></p>
+
 # LeggiMi
 
 **Listen to your documents.** LeggiMi is an offline text‑to‑speech reader for Android: open (or *share*) a PDF, Word, Markdown, TXT or RTF file — or plain text from any app — and it reads it aloud, highlighting each block as it goes — like karaoke for documents. It wears the same comic look as its sibling app *Pay & Plan*.
@@ -117,6 +119,8 @@ android/                        # native Android project
   app/src/main/assets/fonts/    # Luckiest Guy + Comic Neue (comic look)
   app/src/main/java/.../print/LeggiMiPrintService.kt   # the virtual printer
   app/src/main/res/xml/print_service.xml, leggimi_paths.xml
+  app/src/main/res/drawable/ic_launcher_*.xml   # adaptive launcher icon (vector)
+docs/icon/generate_icons.py     # renders the same icon to the legacy mipmap PNGs
   app/src/main/java/.../MainActivity.kt
 ```
 

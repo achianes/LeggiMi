@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- a page that talks: tilted paper sheet with a yellow bookmark, and a coral speech bubble with sound waves -->
+    <group android:rotation="-8" android:pivotX="43" android:pivotY="50">
+        <path android:fillColor="#FFFDF7" android:strokeColor="#17161A" android:strokeWidth="3.5"
+            android:pathData="M27,19h32a4,4 0 0 1 4,4v56a4,4 0 0 1 -4,4h-32a4,4 0 0 1 -4,-4v-56a4,4 0 0 1 4,-4z"/>
+        <path android:fillColor="#FFD93D" android:strokeColor="#17161A" android:strokeWidth="3"
+            android:strokeLineJoin="round" android:pathData="M50,19h9v15l-4.5,-3.5l-4.5,3.5z"/>
+        <path android:strokeColor="#17161A" android:strokeWidth="3.5" android:strokeLineCap="round"
+            android:pathData="M30,42h16M30,51h24M30,60h24M30,69h16"/>
+    </group>
+    <!-- speech bubble with tail -->
+    <path android:fillColor="#FF6B6B" android:strokeColor="#17161A" android:strokeWidth="3.5"
+        android:strokeLineJoin="round"
+        android:pathData="M64,47h19a10,10 0 0 1 10,10v13a10,10 0 0 1 -10,10h-13l-13,10l4,-10.5a10,10 0 0 1 -7,-9.5v-13a10,10 0 0 1 10,-10z"/>
+    <!-- speaker dot + sound waves -->
+    <path android:fillColor="#17161A" android:pathData="M66,63.5m-3.2,0a3.2,3.2 0 1,0 6.4,0a3.2,3.2 0 1,0 -6.4,0"/>
+    <path android:strokeColor="#17161A" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:pathData="M72,57a8.5,8.5 0 0 1 0,13M78,53a14,14 0 0 1 0,21"/>
+</vector>
