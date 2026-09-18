@@ -2324,7 +2324,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 <Text style={s.rowSelectEmoji}>☁️</Text>
                 <View style={{ flex: 1, paddingRight: 10 }}>
                   <Text style={[s.rowSelectText, { color: INK }]} numberOfLines={1}>Cloud accounts</Text>
-                  <Text style={[s.libMeta, { color: INK }]} numberOfLines={1}>Google Drive, Dropbox, Nextcloud, pCloud, WebDAV…</Text>
+                  <Text style={[s.libMeta, { color: INK }]} numberOfLines={1}>Google Drive</Text>
                 </View>
                 <Text style={[s.rowSelectChevron, { color: INK }]}>›</Text>
               </ComicBox>

@@ -106,6 +106,8 @@ Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept wi
 
 ### Cloud export
 Exports go into a folder called **LeggiMi** in your cloud, and **free space is checked before every upload**.
+
+> For now the app offers **Google Drive** only. Dropbox and the WebDAV clouds below are implemented (WebDAV is tested) and will be switched back on in a later version (`PROVIDER_ORDER` in `src/cloud/cloud.ts`).
 - **Google Drive**: sign in with Google.
 - **Dropbox**: sign in with Dropbox.
 - **User name + password** (WebDAV): Nextcloud, ownCloud, pCloud, Koofr, Yandex Disk, 4shared and any other WebDAV server (Synology or QNAP NAS, MagentaCLOUD, GMX, Web.de, Infomaniak kDrive…).

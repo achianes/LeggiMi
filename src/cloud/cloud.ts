@@ -129,7 +129,10 @@ export const PROVIDERS: Record<CloudProvider, ProviderInfo> = {
   },
 };
 
-export const PROVIDER_ORDER: CloudProvider[] = ["gdrive", "dropbox", "nextcloud", "pcloud", "koofr", "yandex", "owncloud", "fourshared", "webdav"];
+// Only Google Drive is offered for now (user decision 2026-09-18); the other
+// providers are implemented and tested (WebDAV) and will be switched back on later.
+export const ALL_PROVIDERS: CloudProvider[] = ["gdrive", "dropbox", "nextcloud", "pcloud", "koofr", "yandex", "owncloud", "fourshared", "webdav"];
+export const PROVIDER_ORDER: CloudProvider[] = ["gdrive"];
 
 const KEY = "cloud:accounts";
 
