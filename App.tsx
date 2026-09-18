@@ -1528,30 +1528,30 @@ function AppInner() {
   };
 
   // ---- recordings: offline transcription (whisper.cpp)
-  const saveTextExport = async (title: string, text: string, as: "txt" | "pdf" | "share" | "cloud") => {
+  // Transcripts: always saved in Download/LeggiMi first, then (optionally) cloud or share
+  const saveTextExport = async (title: string, text: string, as: "txt" | "pdf") => {
     const base = safeFileName(title.replace(/\.[a-z0-9]{2,4}$/i, "")) + " (transcript)";
     await RNFS.mkdir(`${RNFS.CachesDirectoryPath}/export`).catch(() => {});
     try {
-      if (as === "cloud") {
-        const out = `${RNFS.CachesDirectoryPath}/export/${base}.pdf`;
-        await RNFS.unlink(out).catch(() => {});
-        await scanNative.makePdf({ out, mode: "text", title, text });
-        setCloudOpen({ file: { path: out, name: `${base}.pdf`, mime: "application/pdf" } });
-      } else if (as === "pdf") {
-        const out = `${RNFS.CachesDirectoryPath}/export/${base}.pdf`;
-        await RNFS.unlink(out).catch(() => {});
-        await scanNative.makePdf({ out, mode: "text", title, text });
-        const where = await scanNative.saveToDownloads(out, `${base}.pdf`, "application/pdf");
-        Alert.alert("Saved", `${base}.pdf\nis in ${where.replace(/\/[^/]+$/, "")}.`);
-      } else {
-        const out = `${RNFS.CachesDirectoryPath}/export/${base}.txt`;
-        await RNFS.writeFile(out, text, "utf8");
-        if (as === "share") await scanNative.shareFile(out, "text/plain", `${base}.txt`);
-        else {
-          const where = await scanNative.saveToDownloads(out, `${base}.txt`, "text/plain");
-          Alert.alert("Saved", `${base}.txt\nis in ${where.replace(/\/[^/]+$/, "")}.`);
-        }
-      }
+      const name = `${base}.${as}`;
+      const mime = as === "pdf" ? "application/pdf" : "text/plain";
+      const out = `${RNFS.CachesDirectoryPath}/export/${name}`;
+      await RNFS.unlink(out).catch(() => {});
+      if (as === "pdf") await scanNative.makePdf({ out, mode: "text", title, text });
+      else await RNFS.writeFile(out, text, "utf8");
+      const where = await scanNative.saveToDownloads(out, name, mime);
+      const next = await askChoice(
+        "SAVED",
+        `${name}
+is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
+        "✅",
+        [
+          { key: "cloud", icon: "☁️", label: "Cloud", sub: "Into the LeggiMi folder of your cloud", color: GRAPE },
+          { key: "share", icon: "📤", label: "Share", sub: "Send it to another app", color: SKY },
+        ]
+      );
+      if (next === "cloud") setCloudOpen({ file: { path: out, name, mime } });
+      else if (next === "share") await scanNative.shareFile(out, mime, name);
     } catch (e: any) {
       Alert.alert("Export", String(e?.message ?? e));
     }
@@ -1666,14 +1666,12 @@ function AppInner() {
         "✅",
         [
           { key: "read", icon: "🔊", label: "Read it aloud", color: MINT },
-          { key: "txt", icon: "📄", label: "Save as text file", sub: "Download/LeggiMi", color: YELLOW },
-          { key: "pdf", icon: "📕", label: "Save as PDF", sub: "Download/LeggiMi", color: CORAL },
-          { key: "cloud", icon: "☁️", label: "Save to cloud", sub: "PDF in the LeggiMi folder of your cloud", color: GRAPE },
-          { key: "share", icon: "📤", label: "Share the text", color: SKY },
+          { key: "txt", icon: "📄", label: "Save as text file", sub: "Download/LeggiMi, then cloud or share if you like", color: YELLOW },
+          { key: "pdf", icon: "📕", label: "Save as PDF", sub: "Download/LeggiMi, then cloud or share if you like", color: CORAL },
         ]
       );
       if (next === "read" || (next === null && autoStart)) setTimeout(() => speakFrom(startIdx), 200);
-      else if (next === "txt" || next === "pdf" || next === "share" || next === "cloud") await saveTextExport(name, tr.text, next);
+      else if (next === "txt" || next === "pdf") await saveTextExport(name, tr.text, next);
     } catch (err: any) {
       setTask(null);
       setIsExtracting(false);

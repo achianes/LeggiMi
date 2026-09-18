@@ -89,7 +89,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
   - **Pages as images**: exactly what you scanned, JPEG pages on A4.
   - **Searchable PDF**: the images plus an invisible OCR text layer placed over the words, so the PDF can be searched, selected and copied.
   - **Text only**: just the recognised text, typeset on A4, a tiny file.
-- **Save** to Download/LeggiMi, **share** to any app, or **upload to your cloud**.
+- **Save first, then send**: every export is saved in Download/LeggiMi under the name you choose. Only then can you also upload it to your cloud or share it to another app.
 
 ### Pictures shared from other apps
 LeggiMi asks what to do:
@@ -99,7 +99,7 @@ LeggiMi asks what to do:
 - **Add to a scan…**: append the picture(s) to one of your scanned documents.
 
 ### Recordings
-Share a voice note or any audio file (mp3, m4a/aac, ogg/opus, flac, wav, amr, 3gp, the audio of a video…). LeggiMi offers to **transcribe it on the phone** with whisper.cpp. Then you can read it aloud, save it as TXT or PDF, share it, or upload it to the cloud. It is kept in the Library either way. Pauses in the speech start new paragraphs, and the language is detected automatically.
+Share a voice note or any audio file (mp3, m4a/aac, ogg/opus, flac, wav, amr, 3gp, the audio of a video…). LeggiMi offers to **transcribe it on the phone** with whisper.cpp. Then you can read it aloud or save it as TXT or PDF in Download/LeggiMi; after saving you can also send it to the cloud or share it. It is kept in the Library either way. Pauses in the speech start new paragraphs, and the language is detected automatically.
 
 ### Library
 Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept with an icon per type, the date and how far you got. Reopening is instant because the clean text is cached: no second extraction, OCR or transcription. Scans keep their pages and can be edited again (✎).
@@ -150,7 +150,7 @@ Android does not let a print service open an app by itself. LeggiMi posts a **�
    - **Enhance**: choose a filter, rotate, move the page left or right, then **Apply**.
 3. Add more pages at any time with **Camera** or **Photos**.
 4. **Read** runs OCR on all pages and starts reading.
-5. **PDF** exports a PDF (images, searchable or text) to Downloads, to another app, or to your cloud.
+5. **PDF**: pick the file name and the kind of PDF (images, searchable or text), then **Save PDF**. It lands in Download/LeggiMi; the next screen offers **Cloud**, **Share** or **Done**.
 
 Scans live in the Library. Tap a scan to read it, or ✎ to edit its pages.
 

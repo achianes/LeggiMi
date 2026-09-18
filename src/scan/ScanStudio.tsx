@@ -236,6 +236,9 @@ export default function ScanStudio(props: Props) {
   const previewSeq = useRef(0);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<PdfMode>("searchable");
+  // every export is saved first (Download/LeggiMi); only then cloud or share
+  const [exportName, setExportName] = useState("");
+  const [afterSave, setAfterSave] = useState<{ file: ExportTarget; where: string } | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const startedRef = useRef(false);
 
@@ -548,7 +551,14 @@ export default function ScanStudio(props: Props) {
     props.onRead(d, text);
   };
 
-  const buildPdf = async (mode: PdfMode): Promise<ExportTarget | null> => {
+  const openExport = () => {
+    const d = docRef.current;
+    if (!d || !d.pages.length) return;
+    setExportName(d.name);
+    setExportOpen(true);
+  };
+
+  const buildPdf = async (mode: PdfMode, fileBase: string): Promise<ExportTarget | null> => {
     let d = docRef.current;
     if (!d || !d.pages.length) return null;
     if (mode !== "image") {
@@ -559,7 +569,7 @@ export default function ScanStudio(props: Props) {
         return null;
       }
     }
-    const base = safeFileName(d.name);
+    const base = safeFileName(fileBase.trim() || d.name);
     const name = mode === "text" ? `${base} (text).pdf` : `${base}.pdf`;
     const out = `${RNFS.CachesDirectoryPath}/export/${name}`;
     setBusy("Building the PDF…");
@@ -588,21 +598,27 @@ export default function ScanStudio(props: Props) {
     }
   };
 
-  const exportTo = async (dest: "downloads" | "share" | "cloud") => {
-    const f = await buildPdf(exportMode);
+  // step 1: always save a copy in Download/LeggiMi
+  const saveExport = async () => {
+    const f = await buildPdf(exportMode, exportName);
     if (!f) return;
     try {
-      if (dest === "downloads") {
-        const where = await scanNative.saveToDownloads(f.path, f.name, f.mime);
-        setExportOpen(false);
-        Alert.alert("Saved", `${f.name}\nis in ${where.replace(/\/[^/]+$/, "")}.`);
-      } else if (dest === "share") {
-        setExportOpen(false);
-        await scanNative.shareFile(f.path, f.mime, f.name);
-      } else if (props.onCloudExport) {
-        setExportOpen(false);
-        props.onCloudExport(f);
-      }
+      const where = await scanNative.saveToDownloads(f.path, f.name, f.mime);
+      setExportOpen(false);
+      setAfterSave({ file: f, where: where.replace(/\/[^/]+$/, "") });
+    } catch (e: any) {
+      Alert.alert("Save", String(e?.message ?? e));
+    }
+  };
+
+  // step 2: then, if wanted, the cloud or another app
+  const afterSaveTo = async (dest: "cloud" | "share") => {
+    const a = afterSave;
+    if (!a) return;
+    setAfterSave(null);
+    try {
+      if (dest === "share") await scanNative.shareFile(a.file.path, a.file.mime, a.file.name);
+      else props.onCloudExport?.(a.file);
     } catch (e: any) {
       Alert.alert("Export", String(e?.message ?? e));
     }
@@ -618,6 +634,7 @@ export default function ScanStudio(props: Props) {
   const onBack = () => {
     if (busy) return;
     if (editor) { setEditor(null); return; }
+    if (afterSave) { setAfterSave(null); return; }
     if (exportOpen) { setExportOpen(false); return; }
     close();
   };
@@ -649,7 +666,7 @@ export default function ScanStudio(props: Props) {
               {pages.length && pages.every((p) => !needsOcr(p)) ? " · text recognised" : ""}
             </Text>
           </View>
-          <ComicIconButton icon="📄" onPress={() => pages.length && setExportOpen(true)} disabled={!pages.length} palette={palette} color={SKY} size={42} fontSize={18} />
+          <ComicIconButton icon="📄" onPress={openExport} disabled={!pages.length} palette={palette} color={SKY} size={42} fontSize={18} />
         </View>
 
         {/* pages */}
@@ -701,7 +718,7 @@ export default function ScanStudio(props: Props) {
             <BarItem label="Camera" icon="📷" color={YELLOW} onPress={() => addFromCamera()} palette={palette} />
             <BarItem label="Photos" icon="🖼️" color={BUBBLEGUM} onPress={() => addFromFiles()} palette={palette} />
             <BarItem label="Read" icon="🔊" color={MINT} onPress={readAloud} palette={palette} big />
-            <BarItem label="PDF" icon="📄" color={SKY} onPress={() => setExportOpen(true)} palette={palette} />
+            <BarItem label="PDF" icon="📄" color={SKY} onPress={openExport} palette={palette} />
           </ComicBox>
         ) : null}
 
@@ -783,6 +800,15 @@ export default function ScanStudio(props: Props) {
                   <Text style={{ fontSize: 26 }}>📄</Text>
                   <PosterTitle text="EXPORT PDF" palette={palette} size={26} />
                 </View>
+                <Text style={s.fieldLabel}>File name</Text>
+                <TextInput
+                  value={exportName}
+                  onChangeText={setExportName}
+                  style={s.fieldInput}
+                  placeholder="Document name"
+                  placeholderTextColor={palette.dim}
+                  selectTextOnFocus
+                />
                 {([
                   ["image", "🖼️", "Pages as images", "Exactly what you scanned"],
                   ["searchable", "🔎", "Searchable PDF", "Images + invisible OCR text you can search and copy"],
@@ -806,13 +832,30 @@ export default function ScanStudio(props: Props) {
                     </View>
                   </ComicBox>
                 ))}
-                <View style={s.exportBtns}>
-                  <ComicButton text="DOWNLOADS" icon="⬇️" onPress={() => exportTo("downloads")} palette={palette} color={MINT} compact style={{ flex: 1 }} />
-                  <ComicButton text="SHARE" icon="📤" onPress={() => exportTo("share")} palette={palette} color={SKY} compact style={{ flex: 1 }} />
+                <Text style={s.optSub}>The PDF is saved in Download/LeggiMi first; then you can send it to the cloud or to another app.</Text>
+                <ComicButton text="SAVE PDF" icon="💾" onPress={saveExport} palette={palette} color={MINT} style={{ marginTop: 12 }} />
+              </ComicBox>
+            </View>
+          </View>
+        ) : null}
+
+        {/* after saving: cloud, share or done */}
+        {afterSave ? (
+          <View style={StyleSheet.absoluteFill}>
+            <View style={s.backdrop} onTouchEnd={() => setAfterSave(null)} />
+            <View style={[s.sheetWrap, { bottom: Math.max(12, insetBottom + 8) }]}>
+              <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+                <View style={s.sheetHead}>
+                  <Text style={{ fontSize: 26 }}>✅</Text>
+                  <PosterTitle text="SAVED" palette={palette} size={26} />
                 </View>
+                <Text style={s.optTitle}>{afterSave.file.name}</Text>
+                <Text style={s.optSub}>is in {afterSave.where}. Send it somewhere else too?</Text>
                 {props.onCloudExport ? (
-                  <ComicButton text="CLOUD" icon="☁️" onPress={() => exportTo("cloud")} palette={palette} color={GRAPE} compact style={{ marginTop: 10 }} />
+                  <ComicButton text="CLOUD" icon="☁️" onPress={() => afterSaveTo("cloud")} palette={palette} color={GRAPE} style={{ marginTop: 14 }} />
                 ) : null}
+                <ComicButton text="SHARE" icon="📤" onPress={() => afterSaveTo("share")} palette={palette} color={SKY} style={{ marginTop: 12 }} />
+                <ComicButton text="DONE" onPress={() => setAfterSave(null)} palette={palette} color={palette.surface2} compact style={{ marginTop: 12 }} />
               </ComicBox>
             </View>
           </View>
@@ -882,7 +925,19 @@ function makeStyles(p: Palette) {
     optRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14, paddingVertical: 10 },
     optTitle: { color: p.text, fontFamily: FONT_BOLD, fontSize: 15 },
     optSub: { color: p.dim, fontFamily: FONT_BODY, fontSize: 12.5, marginTop: 1 },
-    exportBtns: { flexDirection: "row", gap: 12, marginTop: 6 },
+    fieldLabel: { color: p.text, fontFamily: FONT_BOLD, fontSize: 14, marginBottom: 6 },
+    fieldInput: {
+      borderWidth: 3,
+      borderColor: p.ink,
+      borderRadius: 14,
+      backgroundColor: p.surface,
+      color: p.text,
+      fontFamily: FONT_BODY,
+      fontSize: 16,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      marginBottom: 12,
+    },
 
     busy: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", backgroundColor: p.bg + "B3", paddingHorizontal: 32 },
     busyCard: { alignItems: "center", paddingHorizontal: 26, paddingVertical: 22, minWidth: 240 },
