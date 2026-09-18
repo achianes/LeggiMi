@@ -1092,17 +1092,69 @@ function AppInner() {
   }, [voiceId, voices]);
 
   // ====== AUTOSCROLL: tieni la frase in lettura in vista ======
-  const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32) => {
+  // Nearby moves (next sentence) glide; far jumps (a chapter, a restored
+  // position) land directly, without animating through all the text between.
+  const lastScrollIdxRef = useRef(0);
+  const jumpViewPosRef = useRef<number | null>(null);
+  // Without fixed row heights a FlatList cannot scroll past the rows it has
+  // drawn, so reaching a far row means drawing everything before it. So the
+  // list shows a window of the text, segments[base…]: a far jump starts a new
+  // window a few rows above the target, and scrolling back up prepends the
+  // earlier rows in chunks while the visible text stays still.
+  const [listWin, setListWin] = useState({ key: 0, base: 0 });
+  const listBaseRef = useRef(0);
+  const FAR_JUMP = 40;
+  const WIN_LEAD = 6;
+  const listData = useMemo(() => (listWin.base > 0 ? segments.slice(listWin.base) : segments), [segments, listWin.base]);
+
+  const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32, animated?: boolean) => {
     const list = listRef.current;
     if (!list || index < 0 || index >= segmentsRef.current.length) return;
+    const dist = Math.abs(index - lastScrollIdxRef.current);
+    const glide = animated ?? dist <= 8;
+    lastScrollIdxRef.current = index;
+    const settle = () => {
+      if (lastScrollIdxRef.current !== index) return; // moved elsewhere meanwhile
+      const rel = index - listBaseRef.current;
+      if (rel < 0) return;
+      try { listRef.current?.scrollToIndex({ index: rel, viewPosition, animated: false }); } catch {}
+    };
+    if (index < listBaseRef.current || (!glide && dist > FAR_JUMP)) {
+      const base = Math.max(0, index - WIN_LEAD);
+      listBaseRef.current = base;
+      setListWin((w) => ({ key: w.key + 1, base }));
+      [80, 200, 450].forEach((ms) => setTimeout(settle, ms));
+      return;
+    }
     try {
-      list.scrollToIndex({ index, viewPosition, animated: true });
+      list.scrollToIndex({ index: index - listBaseRef.current, viewPosition, animated: glide });
     } catch {}
+    if (!glide) [120, 300].forEach((ms) => setTimeout(settle, ms));
   }, []);
+
+  // scrolled up to the top of the window: bring in the rows before it
+  const onListStartReached = useCallback(() => {
+    if (listBaseRef.current <= 0) return;
+    const base = Math.max(0, listBaseRef.current - 60);
+    listBaseRef.current = base;
+    setListWin((w) => ({ ...w, base }));
+  }, []);
+
+  // a new document starts from wherever its saved position is: jump there
+  // (declared first so it runs before the scroll effect below)
+  useEffect(() => {
+    lastScrollIdxRef.current = -1000;
+    if (listBaseRef.current !== 0) {
+      listBaseRef.current = 0;
+      setListWin((w) => ({ key: w.key + 1, base: 0 }));
+    }
+  }, [segments]);
 
   useEffect(() => {
     if (!segments.length) return;
-    scrollToIndexSafe(currentIdx);
+    const vp = jumpViewPosRef.current ?? 0.32;
+    jumpViewPosRef.current = null;
+    scrollToIndexSafe(currentIdx, vp);
   }, [currentIdx, segments.length, scrollToIndexSafe]);
 
   // ====== SETTINGS ======
@@ -1388,10 +1440,12 @@ function AppInner() {
   const skipToChapter = (ch: Chapter) => {
     setChaptersOpen(false);
     const next = ch.startIndex;
+    // the scroll itself happens in the currentIdx effect, with the heading near the top
+    jumpViewPosRef.current = 0.1;
+    if (next === currentIdx) scrollToIndexSafe(next, 0.1);
     setCurrentIdx(next);
     if (fileId) saveProgress(fileId, next).catch(() => {});
     if (isReading) hardStop().then(() => speakFrom(next));
-    else scrollToIndexSafe(next, 0.1);
   };
 
   // Tap su una frase: sposta il cursore e, se sta leggendo, riparte da lì.
@@ -2260,14 +2314,14 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     ({ item, index }: { item: string; index: number }) => (
       <SegmentRow
         text={item}
-        index={index}
-        active={index === currentIdx}
+        index={index + listWin.base}
+        active={index + listWin.base === currentIdx}
         fontSize={fontSize}
         palette={palette}
         onPress={onPressSegment}
       />
     ),
-    [currentIdx, fontSize, palette, onPressSegment]
+    [currentIdx, fontSize, palette, onPressSegment, listWin.base]
   );
 
   const busy = isExtracting;
@@ -2491,9 +2545,10 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         ) : (
           <ComicBox palette={palette} radius={22} shadow={5} style={s.readerCard} contentStyle={{ flex: 1 }}>
             <FlatList
+              key={`list-${listWin.key}`}
               ref={listRef}
-              data={segments}
-              keyExtractor={(_, i) => String(i)}
+              data={listData}
+              keyExtractor={(_, i) => String(i + listWin.base)}
               renderItem={renderItem}
               extraData={`${currentIdx}|${fontSize}|${themeName}`}
               initialNumToRender={20}
@@ -2501,12 +2556,16 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               windowSize={21}
               contentContainerStyle={s.listContent}
               showsVerticalScrollIndicator
+              onStartReached={onListStartReached}
+              onStartReachedThreshold={1.5}
+              // rows prepended above (scrolling up) must not push the text down
+              maintainVisibleContentPosition={listWin.base > 0 ? { minIndexForVisible: 0 } : undefined}
               onScrollToIndexFailed={(info) => {
+                // the target is not drawn yet: land on an estimate at once
                 listRef.current?.scrollToOffset({
-                  offset: info.averageItemLength * info.index,
+                  offset: Math.max(0, info.averageItemLength * info.index),
                   animated: false,
                 });
-                setTimeout(() => scrollToIndexSafe(info.index), 220);
               }}
             />
           </ComicBox>
