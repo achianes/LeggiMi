@@ -41,7 +41,7 @@ import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
 import { ScanDoc, deleteScan, scanNative, safeFileName } from "./src/scan/store";
 import {
   WHISPER_MODELS, WhisperModelKey, isAudio, getModelKey, setModelKey, hasModel, downloadModel, deleteModel,
-  transcribeAudio, fmtDuration,
+  transcribeAudio, fmtDuration, cancelModelDownload,
 } from "./src/audio/transcribe";
 
 type DocKind = "pdf" | "docx" | "txt" | "md" | "rtf" | "image" | "text" | "print" | "scan" | "audio" | "other";
@@ -870,7 +870,7 @@ function AppInner() {
   // Scanner workspace (CamScanner-like)
   const [scanOpen, setScanOpen] = useState<{
     docId: string | null;
-    start: "camera" | "import" | null;
+    start: "camera" | "import" | "export" | null;
     images?: string[];
     imagesMode?: "asis" | "crop";
   } | null>(null);
@@ -896,7 +896,7 @@ function AppInner() {
   const [speechModelLabel, setSpeechModelLabel] = useState("");
 
   // long local jobs (model download, transcription) shown in the loading card
-  const [task, setTask] = useState<{ title: string; sub?: string; progress?: number } | null>(null);
+  const [task, setTask] = useState<{ title: string; sub?: string; progress?: number; cancel?: () => void } | null>(null);
 
   const [themeName, setThemeName] = useState<ThemeName>("light");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -1529,8 +1529,8 @@ function AppInner() {
 
   // ---- recordings: offline transcription (whisper.cpp)
   // Transcripts: always saved in Download/LeggiMi first, then (optionally) cloud or share
-  const saveTextExport = async (title: string, text: string, as: "txt" | "pdf") => {
-    const base = safeFileName(title.replace(/\.[a-z0-9]{2,4}$/i, "")) + " (transcript)";
+  const saveTextExport = async (title: string, text: string, as: "txt" | "pdf", suffix = " (transcript)") => {
+    const base = safeFileName(title.replace(/\.[a-z0-9]{2,4}$/i, "")) + suffix;
     await RNFS.mkdir(`${RNFS.CachesDirectoryPath}/export`).catch(() => {});
     try {
       const name = `${base}.${as}`;
@@ -1554,6 +1554,37 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       else if (next === "share") await scanNative.shareFile(out, mime, name);
     } catch (e: any) {
       Alert.alert("Export", String(e?.message ?? e));
+    }
+  };
+
+  // Library: save a document (always to Download/LeggiMi first), then cloud or share
+  const exportFromLibrary = async (e: LibraryEntry) => {
+    setLibraryOpen(false);
+    const opts: ChoiceOption[] = [];
+    if (e.scanId) {
+      opts.push({ key: "scanpdf", icon: "🖼️", label: "PDF of the pages", sub: "Images, searchable or text only", color: SKY });
+    }
+    if (e.textPath) {
+      opts.push(
+        { key: "pdf", icon: "📕", label: "Text as PDF", sub: "Saved in Download/LeggiMi, then cloud or share", color: CORAL },
+        { key: "txt", icon: "📄", label: "Text file (.txt)", sub: "Saved in Download/LeggiMi, then cloud or share", color: YELLOW }
+      );
+    }
+    if (!opts.length) {
+      Alert.alert("Export", "Nothing to export yet.");
+      return;
+    }
+    const k = await askChoice("EXPORT", `“${e.name}”`, "📤", opts);
+    if (k === "scanpdf" && e.scanId) {
+      setScanOpen({ docId: e.scanId, start: "export" });
+      return;
+    }
+    if (k !== "pdf" && k !== "txt") return;
+    try {
+      const text = await RNFS.readFile(e.textPath, "utf8");
+      await saveTextExport(e.name, text, k, e.kind === "audio" ? " (transcript)" : "");
+    } catch {
+      Alert.alert("Export", "The saved text of this document is gone. Open it again from its app.");
     }
   };
 
@@ -1588,12 +1619,15 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     await setModelKey(model);
     if (await hasModel(model)) return model;
     setIsExtracting(true);
-    setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: 0 });
+    setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: 0, cancel: cancelModelDownload });
     try {
-      await downloadModel(model, (f) => setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: f }));
+      await downloadModel(model, (f) =>
+        setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: f, cancel: cancelModelDownload })
+      );
       return model;
     } catch (e: any) {
-      Alert.alert("Speech model", `${String(e?.message ?? e)}\n\nCheck the connection and try again.`);
+      const msg = String(e?.message ?? e);
+      if (msg !== "Cancelled") Alert.alert("Speech model", msg);
       return null;
     } finally {
       setTask(null);
@@ -1617,13 +1651,16 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       ]);
       if (ok === "yes") {
         setIsExtracting(true);
-        setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: 0 });
+        setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: 0, cancel: cancelModelDownload });
         try {
-          await downloadModel(m, (f) => setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: f }));
+          await downloadModel(m, (f) =>
+            setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: f, cancel: cancelModelDownload })
+          );
           // free the space of the other models
           for (const k of Object.keys(WHISPER_MODELS) as WhisperModelKey[]) if (k !== m) await deleteModel(k);
         } catch (e: any) {
-          Alert.alert("Speech model", String(e?.message ?? e));
+          const msg = String(e?.message ?? e);
+          if (msg !== "Cancelled") Alert.alert("Speech model", msg);
         } finally {
           setTask(null);
           setIsExtracting(false);
@@ -2078,7 +2115,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         {chapters.length > 1 && (
           <ComicIconButton icon="☰" onPress={() => setChaptersOpen(true)} palette={palette} color={SKY} size={42} fontSize={18} style={s.headerBtn} />
         )}
-        <ComicIconButton icon="Aa" onPress={() => setSettingsOpen(true)} palette={palette} color={MINT} size={42} fontSize={15} style={s.headerBtn} />
+        <ComicIconButton icon="⚙️" onPress={() => setSettingsOpen(true)} palette={palette} color={MINT} size={42} fontSize={18} style={s.headerBtn} />
       </View>
 
       {/* DOCUMENT STICKER + PROGRESS */}
@@ -2221,6 +2258,9 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 </View>
               ) : null}
               {task && task.progress !== undefined ? <Text style={s.loadingSub}>{Math.round(task.progress * 100)}%</Text> : null}
+              {task?.cancel ? (
+                <ComicButton text="CANCEL" onPress={task.cancel} palette={palette} color={CORAL} compact style={{ marginTop: 12 }} />
+              ) : null}
               {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
             </ComicBox>
           </View>
@@ -2268,9 +2308,26 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
           <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={s.sheetHead}>
-                <Text style={s.sheetEmoji}>🎨</Text>
-                <PosterTitle text="READING" palette={palette} size={26} />
+                <Text style={s.sheetEmoji}>⚙️</Text>
+                <PosterTitle text="SETTINGS" palette={palette} size={26} />
               </View>
+
+              <Text style={s.sheetLabel}>Cloud drives</Text>
+              <ComicBox
+                palette={palette}
+                color={GRAPE}
+                radius={16}
+                shadow={4}
+                onPress={() => { setSettingsOpen(false); setCloudOpen({ file: null }); }}
+                contentStyle={s.rowSelect}
+              >
+                <Text style={s.rowSelectEmoji}>☁️</Text>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={[s.rowSelectText, { color: INK }]} numberOfLines={1}>Cloud accounts</Text>
+                  <Text style={[s.libMeta, { color: INK }]} numberOfLines={1}>Google Drive, Dropbox, Nextcloud, pCloud, WebDAV…</Text>
+                </View>
+                <Text style={[s.rowSelectChevron, { color: INK }]}>›</Text>
+              </ComicBox>
 
               <Text style={s.sheetLabel}>Theme</Text>
               <View style={s.chipRow}>
@@ -2320,19 +2377,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               <ComicBox palette={palette} radius={16} shadow={4} onPress={chooseSpeechModel} contentStyle={s.rowSelect}>
                 <Text style={s.rowSelectEmoji}>🎙️</Text>
                 <Text style={s.rowSelectText} numberOfLines={1}>{speechModelLabel || "Speech model"}</Text>
-                <Text style={s.rowSelectChevron}>›</Text>
-              </ComicBox>
-
-              <Text style={s.sheetLabel}>Cloud</Text>
-              <ComicBox
-                palette={palette}
-                radius={16}
-                shadow={4}
-                onPress={() => { setSettingsOpen(false); setCloudOpen({ file: null }); }}
-                contentStyle={s.rowSelect}
-              >
-                <Text style={s.rowSelectEmoji}>☁️</Text>
-                <Text style={s.rowSelectText} numberOfLines={1}>Cloud accounts</Text>
                 <Text style={s.rowSelectChevron}>›</Text>
               </ComicBox>
 
@@ -2445,6 +2489,15 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             <View style={s.sheetHead}>
               <Text style={s.sheetEmoji}>🕘</Text>
               <PosterTitle text="LIBRARY" palette={palette} size={26} style={{ flex: 1 }} />
+              <ComicIconButton
+                icon="☁️"
+                onPress={() => { setLibraryOpen(false); setCloudOpen({ file: null }); }}
+                palette={palette}
+                color={GRAPE}
+                size={36}
+                fontSize={16}
+                style={{ marginRight: 10 }}
+              />
               {library.length > 0 ? (
                 <ComicButton text="CLEAR" onPress={clearLibrary} palette={palette} color={palette.surface2} compact />
               ) : null}
@@ -2452,7 +2505,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             {library.length === 0 ? (
               <Text style={s.voiceHint}>Everything you open, share or print to LeggiMi ends up here, with the point you reached. Nothing yet.</Text>
             ) : (
-              <Text style={s.voiceHint}>Tap a document to pick up where you left off.</Text>
+              <Text style={s.voiceHint}>Tap a document to pick up where you left off, 📤 to save or send it.</Text>
             )}
             <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
               {library.map((e) => {
@@ -2476,6 +2529,14 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                       </View>
                     </View>
                     <View style={s.libRight}>
+                      <ComicIconButton
+                        icon="📤"
+                        onPress={() => exportFromLibrary(e)}
+                        palette={palette}
+                        color={YELLOW}
+                        size={30}
+                        fontSize={13}
+                      />
                       {e.scanId ? (
                         <ComicIconButton
                           icon="✎"

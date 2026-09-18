@@ -102,7 +102,7 @@ LeggiMi asks what to do:
 Share a voice note or any audio file (mp3, m4a/aac, ogg/opus, flac, wav, amr, 3gp, the audio of a video…). LeggiMi offers to **transcribe it on the phone** with whisper.cpp. Then you can read it aloud or save it as TXT or PDF in Download/LeggiMi; after saving you can also send it to the cloud or share it. It is kept in the Library either way. Pauses in the speech start new paragraphs, and the language is detected automatically.
 
 ### Library
-Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept with an icon per type, the date and how far you got. Reopening is instant because the clean text is cached: no second extraction, OCR or transcription. Scans keep their pages and can be edited again (✎).
+Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept with an icon per type, the date and how far you got. The 📤 button on each row saves the document (text as PDF or TXT, or the scanned pages as PDF) in Download/LeggiMi and then offers the cloud or sharing; ☁️ opens the cloud accounts. Reopening is instant because the clean text is cached: no second extraction, OCR or transcription. Scans keep their pages and can be edited again (✎).
 
 ### Cloud export
 Exports go into a folder called **LeggiMi** in your cloud, and **free space is checked before every upload**.
@@ -110,7 +110,7 @@ Exports go into a folder called **LeggiMi** in your cloud, and **free space is c
 - **Dropbox**: sign in with Dropbox.
 - **User name + password** (WebDAV): Nextcloud, ownCloud, pCloud, Koofr, Yandex Disk, 4shared and any other WebDAV server (Synology or QNAP NAS, MagentaCLOUD, GMX, Web.de, Infomaniak kDrive…).
 
-Passwords and tokens are encrypted with a key held by the Android Keystore. They are never stored in plain text and never leave the phone except to talk to your cloud.
+Every cloud operation has a timeout and a **Cancel** button, so a missing connection never leaves the app waiting. Passwords and tokens are encrypted with a key held by the Android Keystore. They are never stored in plain text and never leave the phone except to talk to your cloud.
 
 ---
 
@@ -135,7 +135,7 @@ The app needs no storage permission on Android 10+. On Android 9 it asks for it 
 ### Reading
 1. Tap 📂 to open a file, or share one to LeggiMi from any app.
 2. Press ▶ to start. Tap any block to jump there.
-3. **Aa** opens the settings: theme, text size, speed, voice, speech model, cloud accounts.
+3. **⚙️** opens the settings: cloud accounts (first), theme, text size, speed, voice, speech model.
 4. ☰ opens the chapter index. 🕘 opens the Library.
 
 ### Printing to LeggiMi
@@ -163,10 +163,10 @@ Share a picture and pick one of the four options. Share a recording and choose *
 | Balanced | 60 MB | good for most recordings (default) |
 | Accurate | 190 MB | best text, slower |
 
-You can change it later in **Aa › Speech to text**.
+You can change it later in **⚙️ › Speech to text**.
 
 ### Voices
-LeggiMi reads with the phone's language by default. Go to **Aa › Voice** to choose another voice. Voices are listed as “Language · code”, with the phone's language first. Tap one to hear a preview. **Install more voices…** opens Android's text-to-speech settings.
+LeggiMi reads with the phone's language by default. Go to **⚙️ › Voice** to choose another voice. Voices are listed as “Language · code”, with the phone's language first. Tap one to hear a preview. **Install more voices…** opens Android's text-to-speech settings.
 
 ---
 
@@ -199,7 +199,7 @@ Google only lets an app use Drive after the app is registered in a Google Cloud 
    ```sh
    keytool -list -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey
    ```
-4. Build and install. **Aa › Cloud › Add account › Google Drive** then shows Google's sign-in.
+4. Build and install. **⚙️ › Cloud accounts › Add account › Google Drive** then shows Google's sign-in.
 
 LeggiMi asks only for the `drive.file` scope: it can see and create **only its own files** (the LeggiMi folder), not the rest of your Drive.
 
@@ -207,7 +207,7 @@ LeggiMi asks only for the `drive.file` scope: it can see and create **only its o
 1. Open [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) › **Create app** › *Scoped access* › *App folder*.
 2. Permissions: `files.content.write`, `files.content.read`, `account_info.read`.
 3. Settings › Redirect URIs: add `http://localhost:53682/`.
-4. Copy the **App key** into **Aa › Cloud › Add account › Dropbox** and press **Connect**. Dropbox's page opens in the browser, and LeggiMi catches the answer on the phone.
+4. Copy the **App key** into **⚙️ › Cloud accounts › Add account › Dropbox** and press **Connect**. Dropbox's page opens in the browser, and LeggiMi catches the answer on the phone.
 
 The sign-in uses OAuth 2 with PKCE, so no app secret is stored in the app. With an *App folder* app, files go to `Apps/<your app>/LeggiMi`.
 

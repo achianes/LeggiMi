@@ -51,11 +51,14 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
     ReactContextBaseJavaModule(ctx), ActivityEventListener {
 
     private val io = Executors.newSingleThreadExecutor()
+    // short timeouts: a missing connection must fail fast, never hang the UI
     private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(300, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    @Volatile private var dropboxServer: ServerSocket? = null
 
     private var googleWaiter: ((String?, String?) -> Unit)? = null
 
@@ -70,9 +73,31 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
             try {
                 promise.resolve(block())
             } catch (e: Throwable) {
-                promise.reject("E_CLOUD", e.message ?: e.toString(), e)
+                promise.reject("E_CLOUD", friendly(e), e)
             }
         }
+    }
+
+    /** Network failures in plain words. */
+    private fun friendly(e: Throwable): String = when (e) {
+        is java.net.UnknownHostException -> "No connection, or the server address is wrong"
+        is java.net.SocketTimeoutException -> "The server did not answer in time: check the connection and try again"
+        is java.net.ConnectException -> "Cannot reach the server: check the connection and the address"
+        is javax.net.ssl.SSLException -> "Secure connection failed: check the address (https) and the connection"
+        is java.io.InterruptedIOException -> "Cancelled"
+        is java.io.IOException -> if (e.message?.contains("Canceled", true) == true) "Cancelled" else "Connection problem: ${e.message ?: "unknown"}"
+        else -> e.message ?: e.toString()
+    }
+
+    /** Stops whatever is in flight: HTTP calls and a pending Dropbox sign-in. */
+    @ReactMethod
+    fun cancel(promise: Promise) {
+        try { http.dispatcher.cancelAll() } catch (_: Exception) {}
+        try { dropboxServer?.close() } catch (_: Exception) {}
+        dropboxServer = null
+        googleWaiter?.invoke(null, "cancelled")
+        googleWaiter = null
+        promise.resolve(true)
     }
 
     private class Space(val used: Long, val total: Long, val free: Long)
@@ -242,6 +267,7 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
                 }
             }
             .addOnFailureListener { e ->
+                android.util.Log.w("LeggiMiCloud", "Google authorize() failed", e)
                 val msg = e.message ?: "Google sign-in failed"
                 done(null, if (msg.contains("10:") || msg.contains("DEVELOPER_ERROR")) GOOGLE_SETUP_HINT else msg)
             }
@@ -251,15 +277,23 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
         if (requestCode != REQ_GOOGLE) return
         val w = googleWaiter ?: return
         googleWaiter = null
-        if (resultCode != Activity.RESULT_OK) {
-            w(null, "cancelled")
-            return
-        }
+        // Read the real outcome: when the app is not registered in Google Cloud,
+        // Google shows the account picker and then refuses without a token.
         try {
             val res = Identity.getAuthorizationClient(activity).getAuthorizationResultFromIntent(data)
-            w(res.accessToken, null)
+            val token = res.accessToken
+            if (token != null) {
+                w(token, null)
+            } else {
+                android.util.Log.w("LeggiMiCloud", "Google authorization without token, resultCode=$resultCode")
+                w(null, GOOGLE_NOT_GRANTED)
+            }
+        } catch (e: com.google.android.gms.common.api.ApiException) {
+            android.util.Log.w("LeggiMiCloud", "Google authorization failed: status=${e.statusCode} resultCode=$resultCode", e)
+            w(null, if (e.statusCode == 10) GOOGLE_SETUP_HINT else "$GOOGLE_NOT_GRANTED (Google status ${e.statusCode})")
         } catch (e: Exception) {
-            w(null, e.message ?: "Google sign-in failed")
+            android.util.Log.w("LeggiMiCloud", "Google authorization failed, resultCode=$resultCode", e)
+            w(null, GOOGLE_NOT_GRANTED)
         }
     }
 
@@ -374,7 +408,7 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
         val challenge = b64url(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII)))
         val state = b64url(ByteArray(16).also { SecureRandom().nextBytes(it) })
         val server = try {
-            ServerSocket(DROPBOX_PORT, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 5 * 60 * 1000 }
+            ServerSocket(DROPBOX_PORT, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 3 * 60 * 1000 }
         } catch (e: Exception) {
             promise.reject("E_DROPBOX", "Port $DROPBOX_PORT is busy: ${e.message}")
             return
@@ -388,6 +422,7 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
             .appendQueryParameter("redirect_uri", DROPBOX_REDIRECT)
             .appendQueryParameter("state", state)
             .build()
+        dropboxServer = server
         io.execute {
             try {
                 val code = server.use { srv ->
@@ -431,7 +466,15 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
                 SecretStore.put(ctx, id, JSONObject().put("type", "dropbox").put("appKey", key).put("refresh", refresh).put("email", email).toString())
                 promise.resolve(spaceMap(id, email, space))
             } catch (e: Throwable) {
-                promise.reject("E_DROPBOX", e.message ?: e.toString(), e)
+                val msg = when {
+                    e is java.net.SocketTimeoutException && dropboxServer != null ->
+                        "No answer from Dropbox: the sign-in was not completed in 3 minutes"
+                    e is java.net.SocketException && dropboxServer == null -> "Cancelled"
+                    else -> friendly(e)
+                }
+                promise.reject("E_DROPBOX", msg, e)
+            } finally {
+                dropboxServer = null
             }
         }
         val view = Intent(Intent.ACTION_VIEW, authUrl).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -571,7 +614,14 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
         private const val DROPBOX_PORT = 53682
         private const val DROPBOX_REDIRECT = "http://localhost:53682/"
         private const val GOOGLE_SETUP_HINT =
-            "Google Drive is not enabled for this build yet: the app must be registered in a Google Cloud project " +
-                "(Drive API + an Android OAuth client for com.leggimimobile with the signing certificate SHA-1). See the README."
+            "Google Drive is not enabled for this build yet. In a Google Cloud project: enable the Google Drive API, " +
+                "set up the OAuth consent screen (add your account as a test user) and create an Android OAuth client " +
+                "for package com.leggimimobile with SHA-1 5E:8F:16:06:2E:A3:CD:2C:4A:0D:54:78:76:BA:A6:F3:8C:AB:F6:25. " +
+                "Steps in the README, Cloud export setup."
+        private const val GOOGLE_NOT_GRANTED =
+            "Google did not give LeggiMi access to Drive. If you chose an account and nothing else happened, " +
+                "this build is not registered in Google Cloud yet: enable the Google Drive API, add yourself as a test user " +
+                "on the OAuth consent screen and create an Android OAuth client for com.leggimimobile with SHA-1 " +
+                "5E:8F:16:06:2E:A3:CD:2C:4A:0D:54:78:76:BA:A6:F3:8C:AB:F6:25 (README, Cloud export setup)."
     }
 }

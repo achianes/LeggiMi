@@ -55,6 +55,15 @@ export async function deleteModel(k: WhisperModelKey) {
   await RNFS.unlink(modelPath(k)).catch(() => {});
 }
 
+let currentJob: number | null = null;
+
+/** Stops a model download in progress (the partial file is removed). */
+export function cancelModelDownload() {
+  if (currentJob !== null) {
+    try { RNFS.stopDownload(currentJob); } catch {}
+  }
+}
+
 /** Downloads the model once (resumes are not supported: a failed download is removed). */
 export async function downloadModel(k: WhisperModelKey, onProgress: (fraction: number) => void) {
   await RNFS.mkdir(MODEL_DIR).catch(() => {});
@@ -65,12 +74,25 @@ export async function downloadModel(k: WhisperModelKey, onProgress: (fraction: n
     toFile: tmp,
     background: true,
     progressDivider: 2,
+    // fail instead of waiting forever when the connection drops
+    connectionTimeout: 15000,
+    readTimeout: 30000,
     progress: (r) => {
       const total = r.contentLength > 0 ? r.contentLength : WHISPER_MODELS[k].bytes;
       onProgress(Math.min(1, r.bytesWritten / total));
     },
   });
-  const res = await job.promise;
+  currentJob = job.jobId;
+  let res;
+  try {
+    res = await job.promise;
+  } catch (e: any) {
+    await RNFS.unlink(tmp).catch(() => {});
+    const msg = String(e?.message ?? e);
+    throw new Error(/abort|cancel/i.test(msg) ? "Cancelled" : `Download failed: ${msg}. Check the connection and try again.`);
+  } finally {
+    currentJob = null;
+  }
   if (res.statusCode !== 200) {
     await RNFS.unlink(tmp).catch(() => {});
     throw new Error(`Download failed (HTTP ${res.statusCode})`);

@@ -1,5 +1,5 @@
 // Cloud accounts sheet: manage accounts (Settings) or pick one to upload a file.
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator, Alert, StyleSheet, Linking } from "react-native";
 import {
   INK, YELLOW, CORAL, MINT, FONT_BODY, FONT_BOLD, Palette,
@@ -26,6 +26,13 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
   const [accounts, setAccounts] = useState<CloudAccount[]>([]);
   const [screen, setScreen] = useState<Screen>({ kind: "list" });
   const [busy, setBusy] = useState<string | null>(null);
+  // each network operation gets a number; cancelling bumps it so late answers are ignored
+  const opRef = useRef(0);
+  const cancelBusy = () => {
+    opRef.current++;
+    cloudNative.cancel().catch(() => {});
+    setBusy(null);
+  };
   // form fields
   const [server, setServer] = useState("");
   const [user, setUser] = useState("");
@@ -46,14 +53,21 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
   }, [visible]);
 
   const refresh = useCallback(async (a: CloudAccount) => {
+    setBusy("Checking the free space…");
+    const op = ++opRef.current;
     try {
       const r = await cloudNative.info(a.id);
+      if (op !== opRef.current) return;
       const list = (await loadAccounts()).map((x) =>
         x.id === a.id ? { ...x, free: r.free, total: r.total, used: r.used, checkedAt: Date.now() } : x
       );
       await persist(list);
     } catch (e: any) {
-      Alert.alert(PROVIDERS[a.provider].name, String(e?.message ?? e));
+      if (op !== opRef.current) return;
+      const msg = String(e?.message ?? e);
+      if (!/cancel/i.test(msg)) Alert.alert(PROVIDERS[a.provider].name, msg);
+    } finally {
+      if (op === opRef.current) setBusy(null);
     }
   }, []);
 
@@ -88,6 +102,7 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
       return;
     }
     setBusy(info.auth === "webdav" ? "Checking the login and the free space…" : "Waiting for the sign-in…");
+    const op = ++opRef.current;
     try {
       const r =
         info.auth === "google"
@@ -95,6 +110,7 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
           : info.auth === "dropbox"
           ? await cloudNative.dropboxConnect(appKey.trim())
           : await cloudNative.webdavConnect(url, user.trim(), pass, user.trim());
+      if (op !== opRef.current) return;
       const acc: CloudAccount = {
         id: r.id,
         provider: p,
@@ -110,10 +126,11 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
       setScreen({ kind: "list" });
       Alert.alert(info.name, `Connected. The folder “LeggiMi” is ready.\n${fmtSpace(acc)}.`);
     } catch (e: any) {
+      if (op !== opRef.current) return;
       const msg = String(e?.message ?? e);
       if (!/cancel/i.test(msg)) Alert.alert(info.name, msg);
     } finally {
-      setBusy(null);
+      if (op === opRef.current) setBusy(null);
       setPass("");
     }
   };
@@ -135,8 +152,10 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
   const uploadTo = async (a: CloudAccount) => {
     if (!file) return;
     setBusy(`Uploading to ${PROVIDERS[a.provider].name}…`);
+    const op = ++opRef.current;
     try {
       const r = await cloudNative.upload(a.id, file.path, file.name, file.mime);
+      if (op !== opRef.current) return;
       const list = (await loadAccounts()).map((x) =>
         x.id === a.id ? { ...x, free: r.free, total: r.total, used: r.used, checkedAt: Date.now() } : x
       );
@@ -145,13 +164,15 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
       onClose();
       Alert.alert("Uploaded", `${r.path}\n${PROVIDERS[a.provider].name} · ${fmtSpace(r)}.`);
     } catch (e: any) {
+      if (op !== opRef.current) return;
       setBusy(null);
-      Alert.alert(PROVIDERS[a.provider].name, String(e?.message ?? e));
+      const msg = String(e?.message ?? e);
+      if (!/cancel/i.test(msg)) Alert.alert(PROVIDERS[a.provider].name, msg);
     }
   };
 
   const back = () => {
-    if (busy) return;
+    if (busy) { cancelBusy(); return; }
     if (screen.kind === "form") setScreen({ kind: "providers" });
     else if (screen.kind === "providers") setScreen({ kind: "list" });
     else onClose();
@@ -321,6 +342,7 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
               <ComicBox palette={palette} color={YELLOW} radius={20} shadow={5} contentStyle={s.busyCard}>
                 <ActivityIndicator color={INK} size="large" />
                 <Text style={s.busyText}>{busy}</Text>
+                <ComicButton text="CANCEL" onPress={cancelBusy} palette={palette} color={CORAL} compact style={{ marginTop: 14 }} />
               </ComicBox>
             </View>
           ) : null}

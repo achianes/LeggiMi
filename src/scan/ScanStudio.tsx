@@ -37,7 +37,7 @@ type Props = {
   /** existing scan to open; null starts a new one */
   docId: string | null;
   /** what to do right after opening */
-  start?: "camera" | "import" | null;
+  start?: "camera" | "import" | "export" | null;
   /** pictures to add straight away (e.g. an image shared to LeggiMi) */
   images?: string[];
   /** "asis": keep the pictures untouched; "crop": find the sheet and enhance (default) */
@@ -289,6 +289,10 @@ export default function ScanStudio(props: Props) {
       }
       else if (props.start === "camera") await addFromCamera(true);
       else if (props.start === "import") await addFromFiles(true);
+      else if (props.start === "export" && d.pages.length) {
+        setExportName(d.name);
+        setExportOpen(true);
+      }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps

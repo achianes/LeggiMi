@@ -151,16 +151,32 @@ type SpaceResult = { id: string; label: string; used: number; total: number; fre
 
 const N: any = (NativeModules as any).LeggiMiCloud;
 
+/** Rejects if the native side does not answer in time (no endless waiting). */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => {
+      N?.cancel?.().catch?.(() => {});
+      reject(new Error(`${what}: no answer. Check the connection and try again.`));
+    }, ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 export const cloudNative = {
   available: () => !!N,
   webdavConnect: (url: string, user: string, pass: string, label: string): Promise<SpaceResult> =>
-    N.webdavConnect(url, user, pass, label),
-  googleConnect: (): Promise<SpaceResult> => N.googleConnect(),
-  dropboxConnect: (appKey: string): Promise<SpaceResult> => N.dropboxConnect(appKey),
-  info: (id: string): Promise<SpaceResult> => N.info(id),
+    withTimeout(N.webdavConnect(url, user, pass, label), 60_000, "Connection"),
+  // the user may take a while on Google's / Dropbox's own screens
+  googleConnect: (): Promise<SpaceResult> => withTimeout(N.googleConnect(), 5 * 60_000, "Google sign-in"),
+  dropboxConnect: (appKey: string): Promise<SpaceResult> => withTimeout(N.dropboxConnect(appKey), 4 * 60_000, "Dropbox sign-in"),
+  info: (id: string): Promise<SpaceResult> => withTimeout(N.info(id), 45_000, "Cloud"),
   upload: (id: string, src: string, name: string, mime: string): Promise<SpaceResult & { path: string; bytes: number }> =>
-    N.upload(id, src, name, mime),
+    withTimeout(N.upload(id, src, name, mime), 10 * 60_000, "Upload"),
   remove: (id: string): Promise<boolean> => N.remove(id),
+  cancel: (): Promise<boolean> => (N?.cancel ? N.cancel() : Promise.resolve(true)),
 };
 
 export function fmtSpace(a: { free: number; total: number }) {
