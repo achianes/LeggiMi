@@ -31,7 +31,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 <table>
   <tr>
     <td align="center"><img src="docs/home.jpg" width="220"><br><sub><b>Home</b> — open, scan, share, print or record</sub></td>
-    <td align="center"><img src="docs/reader.png" width="220"><br><sub><b>Reading a PDF</b> — the block being spoken is a yellow sticker</sub></td>
+    <td align="center"><img src="docs/reader.png" width="220"><br><sub><b>Reading a PDF</b> — the part being spoken is highlighted</sub></td>
     <td align="center"><img src="docs/markdown.png" width="220"><br><sub><b>Shared text</b> — Markdown headings, lists, quotes</sub></td>
   </tr>
   <tr>
