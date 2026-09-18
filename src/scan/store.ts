@@ -85,6 +85,10 @@ export const scanNative = {
   shareFile(src: string, mime: string, title: string): Promise<boolean> {
     return N.shareFile(src, mime, title);
   },
+  /** removes the files LeggiMi saved in Download/LeggiMi; resolves the number removed */
+  clearDownloads(): Promise<number> {
+    return N?.clearDownloads ? N.clearDownloads() : Promise.resolve(0);
+  },
 };
 
 export const SCAN_ROOT = `${RNFS.DocumentDirectoryPath}/scans`;

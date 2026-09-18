@@ -38,7 +38,7 @@ import {
 } from "./src/comic";
 import ScanStudio from "./src/scan/ScanStudio";
 import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
-import { ScanDoc, deleteScan, scanNative, safeFileName } from "./src/scan/store";
+import { ScanDoc, deleteScan, scanNative, safeFileName, loadScan, needsOcr } from "./src/scan/store";
 import {
   WHISPER_MODELS, WhisperModelKey, isAudio, getModelKey, setModelKey, hasModel, downloadModel, deleteModel,
   transcribeAudio, fmtDuration, cancelModelDownload,
@@ -143,6 +143,10 @@ function postCleanExtractedText(raw: string) {
     if (key.length >= 12 && key.length <= 80) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
+  // Titles listed in the table of contents: the TOC rows are not read aloud,
+  // but their titles tell us which lines of the body are chapter headings.
+  const tocTitles: string[] = [];
+
   const cleanedLines: string[] = [];
   for (const l of lines) {
     const low = l.toLowerCase();
@@ -152,7 +156,11 @@ function postCleanExtractedText(raw: string) {
     if (/^(https?:\/\/|www\.)\S+$/i.test(l)) continue; // isolated urls
     if (l.length <= 1) continue;
     // table-of-contents rows: "Chapter 2 ........ 83" / "TITLE ..14" / "1.2 Title · · · · 15"
-    if (/\S\s*(\.\s?){2,}\s*\d{1,4}\s*$/.test(l) || /(·\s?){3,}\s*\d{1,4}\s*$/.test(l)) continue;
+    const toc = l.match(/^(.*?\S)\s*(?:\.\s?){2,}\s*\d{1,4}\s*$/) || l.match(/^(.*?\S)\s*(?:·\s?){3,}\s*\d{1,4}\s*$/);
+    if (toc) {
+      if (toc[1].replace(/[.\s\d]/g, "").length >= 3) tocTitles.push(toc[1]);
+      continue;
+    }
     if (/(\.\s?){6,}/.test(l) && l.replace(/[.\s\d]/g, "").length < 40) continue;
 
     const c = counts.get(low) ?? 0;
@@ -168,6 +176,22 @@ function postCleanExtractedText(raw: string) {
   // keep their own line.
   const TERMINAL = /[.!?…:;"”»)\]]\s*$/;
   const OWN_LINE = /^(#{1,6}\s|[-*•]\s|\d{1,3}[.)]\s|[—–-]\s|["“«])/;
+  // compare titles without case, accents, punctuation or dash styles
+  const normTitle = (x: string) =>
+    x.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const tocSet = new Set(tocTitles.map(normTitle).filter((x) => x.length >= 4));
+  const isTocTitle = (line: string) => {
+    if (!tocSet.size || line.length > 140) return false;
+    const n = normTitle(line.replace(/^#{1,6}\s+/, ""));
+    if (!n) return false;
+    if (tocSet.has(n)) return true;
+    for (const t of tocSet) {
+      // a body heading may carry a little more ("Capitolo 3 – La visita" vs "La visita")
+      if (n.startsWith(t) && n.length <= t.length + 4) return true;
+      if (n.endsWith(t) && n.length <= t.length + 16 && t.length >= 6) return true;
+    }
+    return false;
+  };
   const merged: string[] = [];
   for (const l of cleanedLines) {
     if (!l) { merged.push(""); continue; }
@@ -185,6 +209,8 @@ function postCleanExtractedText(raw: string) {
         !OWN_LINE.test(l) &&
         !isChapterHeading(prev) &&
         !isChapterHeading(l) &&
+        !isTocTitle(prev) &&
+        !isTocTitle(l) &&
         (startsLower || (prevOpen && blanks === 0) || prevMidSentence);
       if (canJoin) {
         merged.length = j + 1;
@@ -193,6 +219,15 @@ function postCleanExtractedText(raw: string) {
       }
     }
     merged.push(l);
+  }
+
+  // lines named in the table of contents become real headings (kept in the
+  // cached text too, so the Library reopens the document with the same chapters)
+  if (tocSet.size) {
+    for (let i = 0; i < merged.length; i++) {
+      const m = merged[i];
+      if (m && !m.startsWith("#") && isTocTitle(m)) merged[i] = `## ${m}`;
+    }
   }
 
   let out = merged.join("\n");
@@ -892,7 +927,7 @@ function AppInner() {
   };
 
   // cloud accounts sheet; with a file it asks where to upload it
-  const [cloudOpen, setCloudOpen] = useState<{ file: UploadFile | null } | null>(null);
+  const [cloudOpen, setCloudOpen] = useState<{ file: UploadFile | null; onUploaded?: () => void } | null>(null);
   const [speechModelLabel, setSpeechModelLabel] = useState("");
 
   // long local jobs (model download, transcription) shown in the loading card
@@ -1362,24 +1397,101 @@ function AppInner() {
     if (entry.scanId) deleteScan(entry.scanId).catch(() => {});
   };
 
-  const clearLibrary = () => {
-    Alert.alert("Clear library", "Remove every document and its saved position?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Clear",
-        style: "destructive",
-        onPress: () => {
-          for (const e of libraryRef.current) {
-            if (e.textPath) RNFS.unlink(e.textPath).catch(() => {});
-            AsyncStorage.removeItem(`progress:${e.id}`).catch(() => {});
-            if (e.scanId) deleteScan(e.scanId).catch(() => {});
-          }
-          libraryRef.current = [];
-          setLibrary([]);
-          persistLibrary([]).catch(() => {});
+  // Clean the phone: everything LeggiMi keeps locally (never the cloud).
+  const dirSize = async (dir: string): Promise<number> => {
+    try {
+      if (!(await RNFS.exists(dir))) return 0;
+      let total = 0;
+      for (const it of await RNFS.readDir(dir)) {
+        total += it.isDirectory() ? await dirSize(it.path) : Number(it.size) || 0;
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  };
+
+  const clearLibrary = async () => {
+    setLibraryOpen(false);
+    const what = await askChoice(
+      "CLEAN THE PHONE",
+      "Removes what LeggiMi keeps on this phone. Files already in your cloud stay there: delete them one by one in the cloud. Cloud accounts and the speech model are kept.",
+      "🧹",
+      [
+        {
+          key: "all",
+          icon: "🧹",
+          label: "Everything on this phone",
+          sub: "Library, reading positions, scanned pages, temporary files and the files saved in Download/LeggiMi",
+          color: CORAL,
         },
-      },
-    ]);
+        {
+          key: "app",
+          icon: "🗂️",
+          label: "Only the app data",
+          sub: "Same, but keep the files saved in Download/LeggiMi",
+          color: YELLOW,
+        },
+      ]
+    );
+    if (what !== "all" && what !== "app") return;
+    const sure = await new Promise<boolean>((resolve) =>
+      Alert.alert(
+        "Delete for good?",
+        what === "all"
+          ? "Library, scans, temporary files and Download/LeggiMi will be deleted from this phone. This cannot be undone."
+          : "Library, scans and temporary files will be deleted from this phone. This cannot be undone.",
+        [
+          { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+          { text: "Delete", style: "destructive", onPress: () => resolve(true) },
+        ],
+        { cancelable: true, onDismiss: () => resolve(false) }
+      )
+    );
+    if (!sure) return;
+    setIsExtracting(true);
+    setTask({ title: "CLEANING…", sub: "Removing the local files" });
+    try {
+      // stop and close whatever is open
+      await hardStop();
+      setSegments([]);
+      segmentsRef.current = [];
+      setChapters([]);
+      setPicked(null);
+      setFileId(null);
+      fileIdRef.current = null;
+
+      const docs = libraryRef.current.length;
+      const dirs = [LIBRARY_DIR, `${RNFS.DocumentDirectoryPath}/scans`, RNFS.CachesDirectoryPath];
+      let freed = 0;
+      for (const d of dirs) freed += await dirSize(d);
+      await RNFS.unlink(LIBRARY_DIR).catch(() => {});
+      await RNFS.unlink(`${RNFS.DocumentDirectoryPath}/scans`).catch(() => {});
+      for (const it of await RNFS.readDir(RNFS.CachesDirectoryPath).catch(() => [] as any[])) {
+        await RNFS.unlink(it.path).catch(() => {});
+      }
+      const keys = await AsyncStorage.getAllKeys();
+      const drop = keys.filter((k) => k.startsWith("progress:") || k.startsWith("scan:"));
+      if (drop.length) await AsyncStorage.multiRemove(drop);
+      libraryRef.current = [];
+      setLibrary([]);
+      await persistLibrary([]);
+      let removed = 0;
+      if (what === "all") removed = await scanNative.clearDownloads().catch(() => 0);
+      setTask(null);
+      setIsExtracting(false);
+      const mb = (freed / 1024 / 1024).toFixed(1);
+      Alert.alert(
+        "Phone cleaned",
+        `${docs} document${docs === 1 ? "" : "s"} removed · ${mb} MB freed` +
+          (what === "all" ? ` · ${removed} file${removed === 1 ? "" : "s"} deleted from Download/LeggiMi` : "") +
+          ". Your cloud was not touched."
+      );
+    } catch (e: any) {
+      setTask(null);
+      setIsExtracting(false);
+      Alert.alert("Clean", String(e?.message ?? e));
+    }
   };
 
   // Reopen a document from the Library: the clean text is cached, so no
@@ -1586,6 +1698,67 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     } catch {
       Alert.alert("Export", "The saved text of this document is gone. Open it again from its app.");
     }
+  };
+
+  // Library: "Move to cloud" = upload a PDF to the LeggiMi folder of the cloud,
+  // then (only if the upload worked) remove the document from this phone.
+  const moveToCloud = async (e: LibraryEntry) => {
+    setLibraryOpen(false);
+    const ok = await askChoice(
+      "MOVE TO CLOUD",
+      `“${e.name}” is uploaded as a PDF to the LeggiMi folder of your cloud. When the upload is done it is removed from this phone (Library, text${e.scanId ? " and scanned pages" : ""}).`,
+      "☁️",
+      [{ key: "go", icon: "☁️", label: "Choose the cloud and move", sub: "Nothing is deleted if the upload fails", color: GRAPE }]
+    );
+    if (ok !== "go") return;
+    const base = safeFileName(e.name.replace(/\.[a-z0-9]{2,4}$/i, ""));
+    const name = `${base}.pdf`;
+    const out = `${RNFS.CachesDirectoryPath}/export/${name}`;
+    setIsExtracting(true);
+    setTask({ title: "PREPARING THE PDF", sub: e.name });
+    try {
+      await RNFS.mkdir(`${RNFS.CachesDirectoryPath}/export`).catch(() => {});
+      await RNFS.unlink(out).catch(() => {});
+      const doc = e.scanId ? await loadScan(e.scanId) : null;
+      if (doc && doc.pages.length) {
+        // the pages themselves; searchable when every page already has its OCR
+        const searchable = doc.pages.every((pg) => !needsOcr(pg));
+        await scanNative.makePdf({
+          out,
+          mode: searchable ? "searchable" : "image",
+          title: doc.name,
+          pages: doc.pages.map((pg) => ({ path: pg.rendered, imgW: pg.w, imgH: pg.h, lines: searchable ? pg.ocr?.lines ?? [] : [] })),
+        });
+      } else if (e.textPath) {
+        const text = await RNFS.readFile(e.textPath, "utf8");
+        await scanNative.makePdf({ out, mode: "text", title: e.name, text });
+      } else {
+        throw new Error("Nothing to move yet.");
+      }
+    } catch (err: any) {
+      setTask(null);
+      setIsExtracting(false);
+      Alert.alert("Move to cloud", String(err?.message ?? err));
+      return;
+    }
+    setTask(null);
+    setIsExtracting(false);
+    setCloudOpen({
+      file: { path: out, name, mime: "application/pdf" },
+      onUploaded: () => {
+        if (fileIdRef.current === e.id) {
+          hardStop();
+          setSegments([]);
+          segmentsRef.current = [];
+          setChapters([]);
+          setPicked(null);
+          setFileId(null);
+          fileIdRef.current = null;
+        }
+        removeFromLibrary(e);
+        RNFS.unlink(out).catch(() => {});
+      },
+    });
   };
 
   const pickSpeechModel = async (current: WhisperModelKey, title: string, message: string) => {
@@ -2499,13 +2672,13 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 style={{ marginRight: 10 }}
               />
               {library.length > 0 ? (
-                <ComicButton text="CLEAR" onPress={clearLibrary} palette={palette} color={palette.surface2} compact />
+                <ComicButton text="CLEAN" icon="🧹" onPress={clearLibrary} palette={palette} color={palette.surface2} compact />
               ) : null}
             </View>
             {library.length === 0 ? (
               <Text style={s.voiceHint}>Everything you open, share or print to LeggiMi ends up here, with the point you reached. Nothing yet.</Text>
             ) : (
-              <Text style={s.voiceHint}>Tap a document to pick up where you left off, 📤 to save or send it.</Text>
+              <Text style={s.voiceHint}>Tap a document to pick up where you left off. 📤 saves or sends it, ☁️ moves it to your cloud.</Text>
             )}
             <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
               {library.map((e) => {
@@ -2534,6 +2707,14 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                         onPress={() => exportFromLibrary(e)}
                         palette={palette}
                         color={YELLOW}
+                        size={30}
+                        fontSize={13}
+                      />
+                      <ComicIconButton
+                        icon="☁️"
+                        onPress={() => moveToCloud(e)}
+                        palette={palette}
+                        color={GRAPE}
                         size={30}
                         fontSize={13}
                       />
@@ -2638,6 +2819,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         palette={palette}
         bottomInset={insets.bottom}
         file={cloudOpen?.file ?? null}
+        onUploaded={cloudOpen?.onUploaded}
         onClose={() => setCloudOpen(null)}
       />
 
@@ -2838,8 +3020,8 @@ function makeStyles(p: Palette) {
     libMeta: { color: p.dim, fontSize: 12, fontFamily: FONT_BODY, marginTop: 1 },
     libTrack: { marginTop: 6, height: 8, borderRadius: 5, borderWidth: 2, overflow: "hidden" },
     libFill: { height: "100%" },
-    libRight: { alignItems: "center", gap: 6, marginLeft: 2 },
-    libPct: { color: p.text, fontFamily: FONT_POSTER, fontSize: 15, includeFontPadding: false },
+    libRight: { width: 76, flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: 8, marginLeft: 2 },
+    libPct: { color: p.text, fontFamily: FONT_POSTER, fontSize: 14, includeFontPadding: false, width: 34, textAlign: "center" },
     tipEmoji: { fontSize: 26 },
     tipText: { flex: 1, color: INK, fontSize: 14.5, lineHeight: 20, fontFamily: FONT_BODY },
 

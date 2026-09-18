@@ -17,12 +17,14 @@ type Props = {
   bottomInset: number;
   /** when set, the sheet asks where to upload this file */
   file?: UploadFile | null;
+  /** called after a successful upload (e.g. "move to cloud" then removes the local copy) */
+  onUploaded?: () => void;
   onClose: () => void;
 };
 
 type Screen = { kind: "list" } | { kind: "providers" } | { kind: "form"; provider: CloudProvider };
 
-export default function CloudSheet({ visible, palette, bottomInset, file, onClose }: Props) {
+export default function CloudSheet({ visible, palette, bottomInset, file, onUploaded, onClose }: Props) {
   const [accounts, setAccounts] = useState<CloudAccount[]>([]);
   const [screen, setScreen] = useState<Screen>({ kind: "list" });
   const [busy, setBusy] = useState<string | null>(null);
@@ -161,8 +163,9 @@ export default function CloudSheet({ visible, palette, bottomInset, file, onClos
       );
       await persist(list);
       setBusy(null);
+      onUploaded?.();
       onClose();
-      Alert.alert("Uploaded", `${r.path}\n${PROVIDERS[a.provider].name} · ${fmtSpace(r)}.`);
+      Alert.alert(onUploaded ? "Moved" : "Uploaded", `${r.path}\n${PROVIDERS[a.provider].name} · ${fmtSpace(r)}.`);
     } catch (e: any) {
       if (op !== opRef.current) return;
       setBusy(null);

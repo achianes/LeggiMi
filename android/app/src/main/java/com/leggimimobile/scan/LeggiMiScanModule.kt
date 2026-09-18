@@ -1,6 +1,7 @@
 package com.leggimimobile.scan
 
 import android.app.Activity
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.os.Build
@@ -262,6 +263,42 @@ class LeggiMiScanModule(private val ctx: ReactApplicationContext) :
             file.copyTo(dest, overwrite = false)
             dest.absolutePath
         }
+    }
+
+    /**
+     * Deletes the files LeggiMi saved in Download/LeggiMi (only this phone: the
+     * cloud is never touched). Returns how many files were removed.
+     */
+    @ReactMethod
+    fun clearDownloads(promise: Promise) = bg(promise) {
+        var n = 0
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = ctx.contentResolver
+            val uri = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            resolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns._ID),
+                MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
+                arrayOf(Environment.DIRECTORY_DOWNLOADS + "/LeggiMi%"),
+                null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    try {
+                        n += resolver.delete(ContentUris.withAppendedId(uri, c.getLong(0)), null, null)
+                    } catch (_: Exception) {
+                        // a file LeggiMi does not own any more (e.g. after reinstalling): leave it
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dirs = listOf(
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LeggiMi"),
+                File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "LeggiMi")
+            )
+            for (d in dirs) d.listFiles()?.forEach { if (it.isFile && it.delete()) n++ }
+        }
+        n
     }
 
     @ReactMethod

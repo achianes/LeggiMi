@@ -65,7 +65,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Block karaoke**: the block being spoken turns into a yellow sticker and the view follows along. Tap any block to read from there.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
 - **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences.
-- **Chapters**: detected headings (or evenly split parts) in a slide-up index.
+- **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
 - **Voices**: every installed TTS voice, the phone's language first, with a one-tap preview.
 - **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2×.
 
@@ -102,7 +102,7 @@ LeggiMi asks what to do:
 Share a voice note or any audio file (mp3, m4a/aac, ogg/opus, flac, wav, amr, 3gp, the audio of a video…). LeggiMi offers to **transcribe it on the phone** with whisper.cpp. Then you can read it aloud or save it as TXT or PDF in Download/LeggiMi; after saving you can also send it to the cloud or share it. It is kept in the Library either way. Pauses in the speech start new paragraphs, and the language is detected automatically.
 
 ### Library
-Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept with an icon per type, the date and how far you got. The 📤 button on each row saves the document (text as PDF or TXT, or the scanned pages as PDF) in Download/LeggiMi and then offers the cloud or sharing; ☁️ opens the cloud accounts. Reopening is instant because the clean text is cached: no second extraction, OCR or transcription. Scans keep their pages and can be edited again (✎).
+Everything you opened, shared, printed, scanned, OCR'd or transcribed is kept with an icon per type, the date and how far you got. Each row has **📤** (save the text as PDF or TXT, or the scanned pages as PDF, in Download/LeggiMi, then optionally cloud or share) and **☁️ Move to cloud** (upload a PDF to the LeggiMi folder of your cloud, then remove the document from the phone — only after the upload worked). **🧹 Clean** removes everything LeggiMi keeps on the phone (Library, positions, scanned pages, temporary files and, if you want, Download/LeggiMi); files already in the cloud are never touched. Reopening is instant because the clean text is cached: no second extraction, OCR or transcription. Scans keep their pages and can be edited again (✎).
 
 ### Cloud export
 Exports go into a folder called **LeggiMi** in your cloud, and **free space is checked before every upload**.
