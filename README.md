@@ -62,9 +62,10 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 
 ### Reading
 - **Many formats**: PDF, DOCX (Word), RTF, TXT, Markdown and other plain-text files.
-- **Block karaoke**: the block being spoken turns into a yellow sticker and the view follows along. Tap any block to read from there.
+- **Reads like a book**: sentences of the same paragraph flow together as one text, with space only between real paragraphs. The sentence being spoken is highlighted inside its paragraph (headings, list items and one-sentence paragraphs become a yellow sticker) and the view follows along. Tap any sentence to read from there.
+- **Instant jumps**: picking a chapter, or reopening a document from the Library, lands straight on the right place, even at the end of a long book, instead of scrolling through all the text in between. Scrolling back up brings the earlier text in seamlessly.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
-- **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences.
+- **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences, and paragraphs cut by a page break (a line ending in “and”, “of”, “e”, “di”…) are joined back too. Leftovers of images such as “[]” are dropped.
 - **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings; dot leaders are not needed, numbered titles like “7. Back home” are chapters rather than list items, titles wrapped on two lines are glued back, and the index itself is not read aloud); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
 - **Voices**: every installed TTS voice, the phone's language first, with a one-tap preview.
 - **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2×.
@@ -136,7 +137,7 @@ The app needs no storage permission on Android 10+. On Android 9 it asks for it 
 
 ### Reading
 1. Tap 📂 to open a file, or share one to LeggiMi from any app.
-2. Press ▶ to start. Tap any block to jump there.
+2. Press ▶ to start. Tap any sentence to jump there.
 3. **⚙️** opens the settings: cloud accounts (first), theme, text size, speed, voice, speech model.
 4. ☰ opens the chapter index. 🕘 opens the Library.
 

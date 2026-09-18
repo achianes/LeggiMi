@@ -207,6 +207,8 @@ function postCleanExtractedText(raw: string) {
     if (/^(pag(ina|e)?|page|p)\.?\s*\d{1,4}(\s*(di|of|\/)\s*\d{1,4})?$/i.test(l)) continue; // "Pagina 3 di 10"
     if (/^(https?:\/\/|www\.)\S+$/i.test(l)) continue; // isolated urls
     if (l.length <= 1) continue;
+    // leftovers of images and form fields: "[]", "( )", "{ }", "□"…
+    if (/^[\[\](){}<>|□■▢☐\s]+$/.test(l)) continue;
     // table-of-contents rows: "Chapter 2 ........ 83" / "TITLE ..14" / "1.2 Title · · · · 15"
     const toc = l.match(/^(.*?\S)\s*(?:\.\s?){2,}\s*\d{1,4}\s*$/) || l.match(/^(.*?\S)\s*(?:·\s?){3,}\s*\d{1,4}\s*$/);
     if (toc) {
@@ -227,6 +229,8 @@ function postCleanExtractedText(raw: string) {
   // continues the previous one. Headings, list items and dialogue dashes
   // keep their own line.
   const TERMINAL = /[.!?…:;"”»)\]]\s*$/;
+  const DANGLING_WORD =
+    /\s(e|ed|o|od|di|da|in|con|su|per|tra|fra|a|ad|al|allo|alla|ai|agli|alle|del|dello|della|dei|degli|delle|dal|dalla|nel|nella|sul|sulla|il|lo|la|i|gli|le|un|uno|una|che|ma|se|and|or|of|to|the|an|with|for|from|but|that)$/;
   const OWN_LINE = /^(#{1,6}\s|[-*•]\s|\d{1,3}[.)]\s|[—–-]\s|["“«])/;
   // compare titles without case, accents, punctuation or dash styles
   const normTitle = (x: string) =>
@@ -278,7 +282,10 @@ function postCleanExtractedText(raw: string) {
       const prevOpen = !TERMINAL.test(prev);
       // a long line ending mid-sentence (lowercase letter or comma) continues
       // even across a page break, whatever the next line starts with
-      const prevMidSentence = prevOpen && prev.length > 40 && /[a-zà-öø-ÿ,;]$/.test(prev);
+      // (and so does any line ending with "e", "di", "con", "the"…: no sentence ends there)
+      const prevMidSentence =
+        (prevOpen && prev.length > 40 && /[a-zà-öø-ÿ,;]$/.test(prev)) ||
+        (prev.length > 12 && DANGLING_WORD.test(prev));
       const canJoin =
         !OWN_LINE.test(l) &&
         !isChapterHeading(prev) &&
@@ -398,6 +405,10 @@ function splitMdBlock(block: string): string[] {
   return out;
 }
 
+// For each segment list made by segmentIntoSentences: which segments open a
+// new paragraph (the others continue the paragraph of the previous one).
+const PARA_STARTS = new WeakMap<string[], boolean[]>();
+
 function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, maxChars = 280, minMerge = 45): string[] {
   let t = normalizeText(raw);
   // text whose chapters come from its table of contents: trust those and do
@@ -413,24 +424,44 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
     if (lines.length >= 8) blocks = lines;
   }
   blocks = blocks.flatMap(splitMdBlock);
+  // leftovers of images and form fields ("[]", "( )", "□") are not text to read
+  blocks = blocks.filter((b) => !/^[\[\](){}<>|□■▢☐\s]+$/.test(b));
+  // a paragraph cut by a page break ("…con Floriana e" / "Mario che…") is one
+  // paragraph (texts saved in the Library before this fix still carry the cut)
+  if (!markdown) {
+    const joined: string[] = [];
+    for (const b of blocks) {
+      const prev = joined[joined.length - 1];
+      if (prev && !prev.includes("\n") && !b.includes("\n") && !isMdHeadingLine(prev) && !isMdHeadingLine(b) && !isMdListLine(b) && !isChapterHeading(b) &&
+          / (e|ed|o|di|da|in|con|su|per|tra|fra|a|ad|al|alla|del|della|dei|delle|nel|nella|il|lo|la|gli|le|un|una|che|ma|and|or|of|to|the|with|for|but|that)$/.test(prev)) {
+        joined[joined.length - 1] = `${prev} ${b}`;
+      } else joined.push(b);
+    }
+    blocks = joined;
+  }
 
   const out: string[] = [];
+  const starts: boolean[] = [];
   for (const block of blocks) {
     const firstLine = block.split("\n")[0] ?? block;
     if (isMdHeadingLine(firstLine) || isMdListLine(firstLine) || /^([-*_]\s*){3,}$/.test(block)) {
       out.push(block);
+      starts.push(true);
       continue;
     }
     // Plain sources (PDF, DOCX, TXT): promote detected titles to Markdown headings
     // so the reader shows them as such. In Markdown files only "#" counts.
     if (!markdown && (tocDriven ? isStrongHeading(firstLine) : isChapterHeading(firstLine)) && block.length <= 90 && !block.includes("\n")) {
       out.push(`## ${block}`);
+      starts.push(true);
       continue;
     }
 
     const sentences = splitSentences(block);
     let acc = "";
-    const flush = () => { if (acc) { out.push(acc); acc = ""; } };
+    const blockStart = out.length;
+    const push = (x: string) => { out.push(x); starts.push(out.length - 1 === blockStart); };
+    const flush = () => { if (acc) { push(acc); acc = ""; } };
 
     for (const s of sentences) {
       if (s.length > maxChars) {
@@ -440,7 +471,7 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
           let cut = rest.lastIndexOf(", ", maxChars);
           if (cut < maxChars * 0.5) cut = rest.lastIndexOf(" ", maxChars);
           if (cut <= 0) cut = maxChars;
-          out.push(rest.slice(0, cut).trim());
+          push(rest.slice(0, cut).trim());
           rest = rest.slice(cut).trim();
         }
         acc = rest;
@@ -454,7 +485,36 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
     }
     flush();
   }
-  return out.filter(Boolean);
+  const segs: string[] = [];
+  const flags: boolean[] = [];
+  out.forEach((x, i) => { if (x) { segs.push(x); flags.push(starts[i] ?? true); } });
+  PARA_STARTS.set(segs, flags);
+  return segs;
+}
+
+/** Rows of the reader: whole paragraphs, so their sentences flow together. */
+type ReadRow = { start: number; end: number; cont: boolean };
+function buildReadRows(segs: string[], maxRowChars = 700): { rows: ReadRow[]; rowOf: Int32Array } {
+  const flags = PARA_STARTS.get(segs);
+  const rows: ReadRow[] = [];
+  const rowOf = new Int32Array(segs.length);
+  // a segment that is not plain prose (heading, list, quote, several lines) stands alone
+  const alone = (x: string) => x.includes("\n") || /^\s*(#{1,6}\s|[-*+•]\s|\d{1,3}[.)]\s|>|([-*_]\s*){3,}$)/.test(x);
+  let chars = 0;
+  segs.forEach((x, i) => {
+    const prev = rows[rows.length - 1];
+    const sameParagraph = !!flags && !flags[i] && !!prev && !alone(x) && !alone(segs[prev.end - 1]);
+    if (sameParagraph && chars + x.length <= maxRowChars) {
+      prev.end = i + 1;
+      chars += x.length + 1;
+    } else {
+      // a paragraph too long for one row goes on in the next one, without a gap
+      rows.push({ start: i, end: i + 1, cont: sameParagraph });
+      chars = x.length;
+    }
+    rowOf[i] = rows.length - 1;
+  });
+  return { rows, rowOf };
 }
 
 // Front/back matter titles that open a section on their own line
@@ -961,13 +1021,68 @@ const SegmentRow = React.memo(function SegmentRow({
   );
 });
 
+type ParaRowProps = {
+  all: string[];
+  start: number;
+  end: number;
+  cont: boolean;
+  /** index of the sentence being read, when it is in this row; -1 otherwise */
+  activeIdx: number;
+  fontSize: number;
+  palette: Palette;
+  onPress: (i: number) => void;
+};
+
+/** A paragraph: its sentences flow as one text, the one being read is highlighted in place. */
+const ParagraphRow = React.memo(function ParagraphRow({
+  all, start, end, cont, activeIdx, fontSize, palette, onPress,
+}: ParaRowProps) {
+  const segs = all.slice(start, end);
+  if (segs.length === 1 && !cont) {
+    // a paragraph of one block (or a heading, a list…): being read, it becomes the yellow sticker
+    if (activeIdx === start) {
+      return <SegmentRow text={segs[0]} index={start} active fontSize={fontSize} palette={palette} onPress={onPress} />;
+    }
+    return (
+      <Pressable onPress={() => onPress(start)} style={rowStyles.para}>
+        <MdBlock text={segs[0]} fontSize={fontSize} color={palette.text} palette={palette} strong={false} />
+      </Pressable>
+    );
+  }
+  const lineHeight = Math.round(fontSize * 1.5);
+  const body: TextStyle = { color: palette.text, fontSize, lineHeight, fontFamily: FONT_BODY };
+  return (
+    <View style={cont ? rowStyles.cont : rowStyles.para}>
+      <Text style={body}>
+        {segs.map((t, j) => {
+          const i = start + j;
+          const active = i === activeIdx;
+          return (
+            <Text
+              key={i}
+              onPress={() => onPress(i)}
+              style={active ? { backgroundColor: palette.hlBg, color: palette.hlText } : undefined}
+            >
+              {renderInline(t, body, palette, active)}
+              {j < segs.length - 1 ? " " : ""}
+            </Text>
+          );
+        })}
+      </Text>
+    </View>
+  );
+});
+
 const rowStyles = StyleSheet.create({
   row: {
     paddingVertical: 6,
     paddingHorizontal: 16,
     marginVertical: 1,
   },
-  activeWrap: { marginHorizontal: 10, marginVertical: 6 },
+  // space only between paragraphs; a paragraph split over rows goes on seamlessly
+  para: { paddingHorizontal: 16, paddingTop: 12 },
+  cont: { paddingHorizontal: 16, paddingTop: 0 },
+  activeWrap: { marginHorizontal: 10, marginTop: 8, marginBottom: 2 },
   activeShadow: { position: "absolute", top: 4, left: 4, right: -4, bottom: -4, borderRadius: 16 },
   activeCard: { borderWidth: 3, borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8 },
 });
@@ -1064,7 +1179,7 @@ function AppInner() {
   const voiceIdRef = useRef<string | null>(null);
   useEffect(() => { voiceIdRef.current = voiceId; }, [voiceId]);
 
-  const listRef = useRef<FlatList<string> | null>(null);
+  const listRef = useRef<FlatList<ReadRow> | null>(null);
   const processingShareRef = useRef(false);
 
   const palette = THEMES[themeName];
@@ -1098,36 +1213,49 @@ function AppInner() {
   const jumpViewPosRef = useRef<number | null>(null);
   // Without fixed row heights a FlatList cannot scroll past the rows it has
   // drawn, so reaching a far row means drawing everything before it. So the
-  // list shows a window of the text, segments[base…]: a far jump starts a new
+  // list shows a window of the text, rows[base…]: a far jump starts a new
   // window a few rows above the target, and scrolling back up prepends the
   // earlier rows in chunks while the visible text stays still.
+  // Rows are paragraphs (see buildReadRows); indexes below are sentence
+  // indexes unless named "row".
+  const readRows = useMemo(() => buildReadRows(segments), [segments]);
+  const readRowsRef = useRef(readRows);
+  readRowsRef.current = readRows;
   const [listWin, setListWin] = useState({ key: 0, base: 0 });
   const listBaseRef = useRef(0);
+  const lastScrollRowRef = useRef(-1);
   const FAR_JUMP = 40;
-  const WIN_LEAD = 6;
-  const listData = useMemo(() => (listWin.base > 0 ? segments.slice(listWin.base) : segments), [segments, listWin.base]);
+  const WIN_LEAD = 3;
+  const listData = useMemo(
+    () => (listWin.base > 0 ? readRows.rows.slice(listWin.base) : readRows.rows),
+    [readRows, listWin.base]
+  );
 
-  const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32, animated?: boolean) => {
+  const scrollToIndexSafe = useCallback((index: number, viewPosition = 0.32, animated?: boolean, force = false) => {
     const list = listRef.current;
     if (!list || index < 0 || index >= segmentsRef.current.length) return;
+    const row = readRowsRef.current.rowOf[index] ?? 0;
     const dist = Math.abs(index - lastScrollIdxRef.current);
     const glide = animated ?? dist <= 8;
     lastScrollIdxRef.current = index;
+    // the next sentence of the same paragraph: the paragraph is already in view
+    if (!force && glide && animated === undefined && row === lastScrollRowRef.current) return;
+    lastScrollRowRef.current = row;
     const settle = () => {
       if (lastScrollIdxRef.current !== index) return; // moved elsewhere meanwhile
-      const rel = index - listBaseRef.current;
+      const rel = row - listBaseRef.current;
       if (rel < 0) return;
       try { listRef.current?.scrollToIndex({ index: rel, viewPosition, animated: false }); } catch {}
     };
-    if (index < listBaseRef.current || (!glide && dist > FAR_JUMP)) {
-      const base = Math.max(0, index - WIN_LEAD);
+    if (row < listBaseRef.current || (!glide && dist > FAR_JUMP)) {
+      const base = Math.max(0, row - WIN_LEAD);
       listBaseRef.current = base;
       setListWin((w) => ({ key: w.key + 1, base }));
       [80, 200, 450].forEach((ms) => setTimeout(settle, ms));
       return;
     }
     try {
-      list.scrollToIndex({ index: index - listBaseRef.current, viewPosition, animated: glide });
+      list.scrollToIndex({ index: row - listBaseRef.current, viewPosition, animated: glide });
     } catch {}
     if (!glide) [120, 300].forEach((ms) => setTimeout(settle, ms));
   }, []);
@@ -1135,7 +1263,7 @@ function AppInner() {
   // scrolled up to the top of the window: bring in the rows before it
   const onListStartReached = useCallback(() => {
     if (listBaseRef.current <= 0) return;
-    const base = Math.max(0, listBaseRef.current - 60);
+    const base = Math.max(0, listBaseRef.current - 30);
     listBaseRef.current = base;
     setListWin((w) => ({ ...w, base }));
   }, []);
@@ -1144,6 +1272,7 @@ function AppInner() {
   // (declared first so it runs before the scroll effect below)
   useEffect(() => {
     lastScrollIdxRef.current = -1000;
+    lastScrollRowRef.current = -1;
     if (listBaseRef.current !== 0) {
       listBaseRef.current = 0;
       setListWin((w) => ({ key: w.key + 1, base: 0 }));
@@ -1442,7 +1571,7 @@ function AppInner() {
     const next = ch.startIndex;
     // the scroll itself happens in the currentIdx effect, with the heading near the top
     jumpViewPosRef.current = 0.1;
-    if (next === currentIdx) scrollToIndexSafe(next, 0.1);
+    if (next === currentIdx) scrollToIndexSafe(next, 0.1, undefined, true);
     setCurrentIdx(next);
     if (fileId) saveProgress(fileId, next).catch(() => {});
     if (isReading) hardStop().then(() => speakFrom(next));
@@ -1462,7 +1591,7 @@ function AppInner() {
     setRate(next);
   };
 
-  const goToCurrent = () => scrollToIndexSafe(currentIdx, 0.32);
+  const goToCurrent = () => scrollToIndexSafe(currentIdx, 0.32, undefined, true);
 
   // sceglie una voce, la salva e ne riproduce un'anteprima
   const onSelectVoice = async (id: string | null) => {
@@ -2311,17 +2440,19 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
   }, []);
 
   const renderItem = useCallback(
-    ({ item, index }: { item: string; index: number }) => (
-      <SegmentRow
-        text={item}
-        index={index + listWin.base}
-        active={index + listWin.base === currentIdx}
+    ({ item }: { item: ReadRow }) => (
+      <ParagraphRow
+        all={segments}
+        start={item.start}
+        end={item.end}
+        cont={item.cont}
+        activeIdx={currentIdx >= item.start && currentIdx < item.end ? currentIdx : -1}
         fontSize={fontSize}
         palette={palette}
         onPress={onPressSegment}
       />
     ),
-    [currentIdx, fontSize, palette, onPressSegment, listWin.base]
+    [segments, currentIdx, fontSize, palette, onPressSegment]
   );
 
   const busy = isExtracting;
@@ -2548,7 +2679,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               key={`list-${listWin.key}`}
               ref={listRef}
               data={listData}
-              keyExtractor={(_, i) => String(i + listWin.base)}
+              keyExtractor={(r) => String(r.start)}
               renderItem={renderItem}
               extraData={`${currentIdx}|${fontSize}|${themeName}`}
               initialNumToRender={20}
