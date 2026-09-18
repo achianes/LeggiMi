@@ -31,9 +31,21 @@ import { WebView } from "react-native-webview";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Slider from "@react-native-community/slider";
 import TextRecognition from "@react-native-ml-kit/text-recognition";
+import {
+  INK, CREAM, PAPER, YELLOW, CORAL, MINT, SKY, GRAPE, TANGERINE, AQUA, BUBBLEGUM,
+  FONT_POSTER, FONT_BODY, FONT_BOLD, THEMES, Palette, ThemeName,
+  ComicBox, ComicButton, ComicIconButton, ComicChip, PosterTitle,
+} from "./src/comic";
+import ScanStudio from "./src/scan/ScanStudio";
+import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
+import { ScanDoc, deleteScan, scanNative, safeFileName } from "./src/scan/store";
+import {
+  WHISPER_MODELS, WhisperModelKey, isAudio, getModelKey, setModelKey, hasModel, downloadModel, deleteModel,
+  transcribeAudio, fmtDuration,
+} from "./src/audio/transcribe";
 
-type DocKind = "pdf" | "docx" | "txt" | "md" | "rtf" | "image" | "text" | "print" | "other";
-type DocSource = "picker" | "share" | "print";
+type DocKind = "pdf" | "docx" | "txt" | "md" | "rtf" | "image" | "text" | "print" | "scan" | "audio" | "other";
+type DocSource = "picker" | "share" | "print" | "scan";
 type Picked = { name: string; uri: string; type?: string | null; kind?: DocKind; ocr?: boolean };
 /** One row of the Library (history): what was opened, how far you got. */
 type LibraryEntry = {
@@ -47,10 +59,11 @@ type LibraryEntry = {
   index: number;
   ocr: boolean;
   markdown: boolean;
-  textPath: string; // cached clean text, so reopening is instant (and OCR runs once)
+  textPath: string; // cached clean text, so reopening is instant (and OCR runs once); "" = not read yet
+  scanId?: string; // for scanned documents: the ScanStudio document
+  pages?: number; // for scanned documents: number of pages
 };
 type Chapter = { title: string; startIndex: number; endIndex: number };
-type ThemeName = "dark" | "light" | "sepia";
 type Voice = { id: string; name?: string; language?: string; quality?: number; latency?: number; networkConnectionRequired?: boolean; notInstalled?: boolean };
 
 const SETTINGS_RATE_KEY = "settings:ttsRate";
@@ -60,77 +73,6 @@ const SETTINGS_VOICE_KEY = "settings:ttsVoice";
 
 const FONT_SIZES = [15, 17, 19, 21, 24, 27, 31];
 const SPEED_PRESETS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-
-// ---- the comic palette (shared with Pay & Plan) ---------------------------
-const INK = "#17161A";
-const CREAM = "#FFF6E5";
-const PAPER = "#FFFDF7";
-const YELLOW = "#FFD93D";
-const CORAL = "#FF6B6B";
-const MINT = "#6BCB77";
-const SKY = "#4D96FF";
-const GRAPE = "#B983FF";
-const TANGERINE = "#FF9F45";
-const AQUA = "#4ECDC4";
-const BUBBLEGUM = "#FF9CEE";
-
-// Font files live in android/app/src/main/assets/fonts; on Android the family
-// name is the file name without extension.
-const FONT_POSTER = "LuckiestGuy-Regular";
-const FONT_BODY = "ComicNeue-Regular";
-const FONT_BOLD = "ComicNeue-Bold";
-
-type Palette = {
-  bg: string;
-  surface: string;
-  surface2: string;
-  text: string;
-  dim: string;
-  ink: string; // outline colour
-  shadow: string; // hard offset shadow colour
-  hlBg: string;
-  hlText: string;
-  statusBar: "light-content" | "dark-content";
-};
-
-const THEMES: Record<ThemeName, Palette> = {
-  light: {
-    bg: CREAM,
-    surface: PAPER,
-    surface2: "#FFEFCB",
-    text: INK,
-    dim: "#6F6862",
-    ink: INK,
-    shadow: INK,
-    hlBg: YELLOW,
-    hlText: INK,
-    statusBar: "dark-content",
-  },
-  sepia: {
-    bg: "#F1E2C4",
-    surface: "#FBF2DE",
-    surface2: "#EBD9B3",
-    text: "#2B2216",
-    dim: "#7D6B4C",
-    ink: "#2B2216",
-    shadow: "#2B2216",
-    hlBg: "#FFD06B",
-    hlText: "#2B2216",
-    statusBar: "dark-content",
-  },
-  dark: {
-    bg: "#1E1C22",
-    surface: "#2C2A32",
-    surface2: "#3A3741",
-    text: CREAM,
-    dim: "#B8B1A5",
-    ink: CREAM,
-    shadow: "#08070A",
-    hlBg: YELLOW,
-    hlText: INK,
-    statusBar: "light-content",
-  },
-};
 
 function extOf(name: string) {
   const m = name.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -468,6 +410,7 @@ function kindOf(name: string, mime: string | null | undefined, source: DocSource
   if (ext === "md" || ext === "markdown" || m.includes("markdown")) return "md";
   if (ext === "rtf" || m.includes("rtf")) return "rtf";
   if (IMAGE_EXTS.includes(ext) || m.startsWith("image/")) return "image";
+  if (isAudio(name, mime)) return "audio";
   if (ext === "txt" || m.startsWith("text/") || isTextLikeExt(ext)) return "txt";
   return "other";
 }
@@ -480,6 +423,8 @@ function kindEmoji(k: DocKind) {
     case "image": return "🖼️";
     case "text": return "💬";
     case "print": return "🖨️";
+    case "scan": return "📷";
+    case "audio": return "🎙️";
     case "txt": return "📄";
     default: return "📎";
   }
@@ -493,6 +438,8 @@ function kindColor(k: DocKind) {
     case "image": return BUBBLEGUM;
     case "text": return AQUA;
     case "print": return YELLOW;
+    case "scan": return SKY;
+    case "audio": return AQUA;
     default: return MINT;
   }
 }
@@ -502,6 +449,8 @@ function kindLabel(k: DocKind) {
     case "image": return "IMG";
     case "text": return "TXT";
     case "print": return "PRNT";
+    case "scan": return "SCAN";
+    case "audio": return "AUDIO";
     case "other": return "FILE";
     default: return k.toUpperCase();
   }
@@ -740,188 +689,6 @@ function mdToPlain(s: string) {
 }
 
 // =====================================================================
-// COMIC UI: flat fill + fat ink outline + hard offset shadow.
-// Same recipe as Pay & Plan's ComicUi.kt, rebuilt with React Native views.
-// =====================================================================
-
-type ComicBoxProps = {
-  children?: React.ReactNode;
-  palette: Palette;
-  color?: string;
-  radius?: number;
-  stroke?: number;
-  shadow?: number;
-  style?: StyleProp<ViewStyle>;
-  contentStyle?: StyleProp<ViewStyle>;
-  onPress?: () => void;
-  disabled?: boolean;
-  hitSlop?: number;
-};
-
-function ComicBox({
-  children, palette, color, radius = 20, stroke = 3, shadow = 5, style, contentStyle, onPress, disabled, hitSlop,
-}: ComicBoxProps) {
-  const bg = color ?? palette.surface;
-  const render = (pressed: boolean) => {
-    const drop = pressed && onPress && !disabled ? 1 : shadow;
-    return (
-      <>
-        {shadow > 0 && (
-          <View
-            pointerEvents="none"
-            style={{
-              position: "absolute",
-              top: drop,
-              left: drop,
-              right: -drop,
-              bottom: -drop,
-              backgroundColor: palette.shadow,
-              borderRadius: radius,
-            }}
-          />
-        )}
-        <View
-          style={[
-            { backgroundColor: bg, borderWidth: stroke, borderColor: palette.ink, borderRadius: radius, overflow: "hidden" },
-            contentStyle,
-          ]}
-        >
-          {children}
-        </View>
-      </>
-    );
-  };
-
-  if (!onPress) {
-    return <View style={[style, disabled && { opacity: 0.45 }]}>{render(false)}</View>;
-  }
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      hitSlop={hitSlop}
-      style={({ pressed }) => [
-        style,
-        disabled && { opacity: 0.45 },
-        pressed && !disabled ? { transform: [{ translateX: shadow - 1 }, { translateY: shadow - 1 }] } : null,
-      ]}
-    >
-      {({ pressed }) => render(pressed)}
-    </Pressable>
-  );
-}
-
-type ComicButtonProps = {
-  text: string;
-  onPress: () => void;
-  palette: Palette;
-  color?: string;
-  icon?: string;
-  disabled?: boolean;
-  compact?: boolean;
-  style?: StyleProp<ViewStyle>;
-  textStyle?: StyleProp<TextStyle>;
-};
-
-function ComicButton({ text, onPress, palette, color = CORAL, icon, disabled, compact, style, textStyle }: ComicButtonProps) {
-  return (
-    <ComicBox
-      palette={palette}
-      color={color}
-      radius={compact ? 14 : 18}
-      shadow={compact ? 4 : 5}
-      onPress={onPress}
-      disabled={disabled}
-      style={style}
-      contentStyle={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "center",
-        paddingHorizontal: compact ? 12 : 18,
-        paddingVertical: compact ? 8 : 12,
-      }}
-    >
-      {icon ? <Text style={{ fontSize: compact ? 15 : 18, marginRight: 6 }}>{icon}</Text> : null}
-      <Text
-        numberOfLines={1}
-        style={[
-          { fontFamily: FONT_BOLD, fontSize: compact ? 13 : 16, color: INK, letterSpacing: 0.5 },
-          textStyle,
-        ]}
-      >
-        {text}
-      </Text>
-    </ComicBox>
-  );
-}
-
-type ComicIconButtonProps = {
-  icon: string;
-  onPress: () => void;
-  palette: Palette;
-  color?: string;
-  size?: number;
-  disabled?: boolean;
-  fontSize?: number;
-  iconColor?: string;
-  style?: StyleProp<ViewStyle>;
-};
-
-function ComicIconButton({ icon, onPress, palette, color, size = 46, disabled, fontSize, iconColor, style }: ComicIconButtonProps) {
-  return (
-    <ComicBox
-      palette={palette}
-      color={color ?? palette.surface}
-      radius={size / 2}
-      shadow={4}
-      onPress={onPress}
-      disabled={disabled}
-      style={style}
-      contentStyle={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}
-    >
-      <Text style={{ fontSize: fontSize ?? size * 0.44, color: iconColor ?? (color ? INK : palette.text), fontFamily: FONT_BOLD, includeFontPadding: false }}>
-        {icon}
-      </Text>
-    </ComicBox>
-  );
-}
-
-type ComicChipProps = { text: string; selected: boolean; onPress: () => void; palette: Palette; color?: string; style?: StyleProp<ViewStyle> };
-
-function ComicChip({ text, selected, onPress, palette, color = SKY, style }: ComicChipProps) {
-  return (
-    <ComicBox
-      palette={palette}
-      color={selected ? color : palette.surface}
-      radius={14}
-      stroke={selected ? 3 : 2}
-      shadow={selected ? 4 : 2}
-      onPress={onPress}
-      style={style}
-      contentStyle={{ paddingHorizontal: 14, paddingVertical: 8 }}
-    >
-      <Text numberOfLines={1} style={{ fontFamily: FONT_BOLD, fontSize: 14, color: selected ? INK : palette.text, letterSpacing: 0.3 }}>
-        {text}
-      </Text>
-    </ComicBox>
-  );
-}
-
-function PosterTitle({ text, palette, size = 28, color, style }: { text: string; palette: Palette; size?: number; color?: string; style?: StyleProp<TextStyle> }) {
-  return (
-    <Text
-      numberOfLines={1}
-      style={[
-        { fontFamily: FONT_POSTER, fontSize: size, lineHeight: Math.round(size * 1.15), color: color ?? palette.text, letterSpacing: 1, includeFontPadding: false },
-        style,
-      ]}
-    >
-      {text}
-    </Text>
-  );
-}
-
-// =====================================================================
 
 type RowProps = {
   text: string;
@@ -1098,7 +865,38 @@ function AppInner() {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const persistTimerRef = useRef<any>(null);
   // what the document being opened is, for the library row
-  const currentMetaRef = useRef<{ name: string; kind: DocKind; source: DocSource; ocr: boolean } | null>(null);
+  const currentMetaRef = useRef<{ name: string; kind: DocKind; source: DocSource; ocr: boolean; scanId?: string; pages?: number } | null>(null);
+
+  // Scanner workspace (CamScanner-like)
+  const [scanOpen, setScanOpen] = useState<{
+    docId: string | null;
+    start: "camera" | "import" | null;
+    images?: string[];
+    imagesMode?: "asis" | "crop";
+  } | null>(null);
+
+  // Comic choice sheet (replaces the 3-button system dialog when there are more options)
+  type ChoiceOption = { key: string; icon: string; label: string; sub?: string; color: string };
+  const [choice, setChoice] = useState<{ title: string; message?: string; emoji?: string; options: ChoiceOption[] } | null>(null);
+  const choiceResolveRef = useRef<((k: string | null) => void) | null>(null);
+  const askChoice = (title: string, message: string, emoji: string, options: ChoiceOption[]) =>
+    new Promise<string | null>((resolve) => {
+      choiceResolveRef.current = resolve;
+      setChoice({ title, message, emoji, options });
+    });
+  const answerChoice = (k: string | null) => {
+    const r = choiceResolveRef.current;
+    choiceResolveRef.current = null;
+    setChoice(null);
+    r?.(k);
+  };
+
+  // cloud accounts sheet; with a file it asks where to upload it
+  const [cloudOpen, setCloudOpen] = useState<{ file: UploadFile | null } | null>(null);
+  const [speechModelLabel, setSpeechModelLabel] = useState("");
+
+  // long local jobs (model download, transcription) shown in the loading card
+  const [task, setTask] = useState<{ title: string; sub?: string; progress?: number } | null>(null);
 
   const [themeName, setThemeName] = useState<ThemeName>("light");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -1205,6 +1003,11 @@ function AppInner() {
   }, [fontIndex, settingsLoaded]);
 
   // ====== LIBRARY ======
+  useEffect(() => {
+    refreshSpeechModelLabel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     loadLibrary().then((list) => {
       libraryRef.current = list;
@@ -1526,6 +1329,8 @@ function AppInner() {
         const now = Date.now();
         const prev = libraryRef.current.find((e) => e.id === fid);
         const entry: LibraryEntry = {
+          ...(prev ?? {}),
+          ...(meta.scanId ? { scanId: meta.scanId, pages: meta.pages } : {}),
           id: fid,
           name: meta.name,
           kind: meta.kind,
@@ -1552,8 +1357,9 @@ function AppInner() {
     libraryRef.current = next;
     setLibrary(next);
     persistLibrary(next).catch(() => {});
-    RNFS.unlink(entry.textPath).catch(() => {});
+    if (entry.textPath) RNFS.unlink(entry.textPath).catch(() => {});
     AsyncStorage.removeItem(`progress:${entry.id}`).catch(() => {});
+    if (entry.scanId) deleteScan(entry.scanId).catch(() => {});
   };
 
   const clearLibrary = () => {
@@ -1564,8 +1370,9 @@ function AppInner() {
         style: "destructive",
         onPress: () => {
           for (const e of libraryRef.current) {
-            RNFS.unlink(e.textPath).catch(() => {});
+            if (e.textPath) RNFS.unlink(e.textPath).catch(() => {});
             AsyncStorage.removeItem(`progress:${e.id}`).catch(() => {});
+            if (e.scanId) deleteScan(e.scanId).catch(() => {});
           }
           libraryRef.current = [];
           setLibrary([]);
@@ -1579,6 +1386,10 @@ function AppInner() {
   // extraction (or OCR) is needed again.
   const openFromLibrary = async (entry: LibraryEntry) => {
     setLibraryOpen(false);
+    if (entry.scanId && !entry.textPath) {
+      setScanOpen({ docId: entry.scanId, start: null });
+      return;
+    }
     setIsExtracting(true);
     await hardStop();
     setSegments([]);
@@ -1588,7 +1399,7 @@ function AppInner() {
     setPicked({ name: entry.name, uri: "", type: null, kind: entry.kind, ocr: entry.ocr });
     setFileId(entry.id);
     fileIdRef.current = entry.id;
-    currentMetaRef.current = { name: entry.name, kind: entry.kind, source: entry.source, ocr: entry.ocr };
+    currentMetaRef.current = { name: entry.name, kind: entry.kind, source: entry.source, ocr: entry.ocr, scanId: entry.scanId, pages: entry.pages };
     try {
       const text = await RNFS.readFile(entry.textPath, "utf8");
       const start = await applyTextForCurrentFile(entry.id, text, { markdown: entry.markdown });
@@ -1615,41 +1426,259 @@ function AppInner() {
       );
     });
 
-  // An image (photo of a page, screenshot...) has no text: offer OCR.
-  const openImageWithOcr = async (fid: string, name: string, localPath: string, autoStart: boolean) => {
+  // Pictures (photos of pages, screenshots...) have no text: ask what to do.
+  const handleImages = async (fid: string, paths: string[], autoStart: boolean) => {
     setIsExtracting(false);
-    const ok = await confirmAsync(
-      "This is an image, not text",
-      "LeggiMi can recognise the text in it right on the phone (OCR, no internet). Run it now?",
-      "Run OCR"
+    const scans = libraryRef.current.filter((e) => e.scanId);
+    const many = paths.length > 1;
+    const k = await askChoice(
+      many ? `${paths.length} IMAGES` : "AN IMAGE",
+      many ? "These are pictures, not text. What should LeggiMi do with them?" : "This is a picture, not text. What should LeggiMi do with it?",
+      "🖼️",
+      [
+        { key: "ocr", icon: "🔍", label: "Read the text", sub: "Recognise the text on the phone (OCR) and read it aloud", color: MINT },
+        { key: "asis", icon: "💾", label: "Save as it is", sub: "Keep the picture in a new scanned document", color: YELLOW },
+        { key: "crop", icon: "✂️", label: "Scan & crop", sub: "Find the sheet, straighten and enhance it", color: SKY },
+        ...(scans.length
+          ? [{ key: "add", icon: "➕", label: "Add to a scan…", sub: `Append to one of your ${scans.length} scanned document${scans.length > 1 ? "s" : ""}`, color: GRAPE }]
+          : []),
+      ]
     );
-    if (!ok) { setPicked(null); return; }
+    if (k === "asis" || k === "crop") {
+      setPicked(null);
+      setScanOpen({ docId: null, start: null, images: paths, imagesMode: k });
+      return;
+    }
+    if (k === "add") {
+      const target = await askChoice(
+        "ADD TO…",
+        "Pick the scanned document that gets the new page" + (many ? "s." : "."),
+        "➕",
+        scans.slice(0, 12).map((e) => ({
+          key: e.scanId!,
+          icon: "📷",
+          label: e.name,
+          sub: `${e.pages ?? 0} page${e.pages === 1 ? "" : "s"} · ${fmtDate(e.lastOpenedAt)}`,
+          color: SKY,
+        }))
+      );
+      setPicked(null);
+      if (target) setScanOpen({ docId: target, start: null, images: paths, imagesMode: "crop" });
+      return;
+    }
+    if (k !== "ocr") { setPicked(null); return; }
     if (!ocrAvailable()) {
       Alert.alert("OCR", "This build has no OCR module. Install the latest LeggiMi build to read images.");
       setPicked(null);
       return;
     }
     setIsExtracting(true);
-    setOcrState({ page: 1, total: 1 });
     try {
-      const text = await ocrImageFile(localPath);
+      const parts: string[] = [];
+      for (let i = 0; i < paths.length; i++) {
+        setOcrState({ page: i + 1, total: paths.length });
+        const t = await ocrImageFile(paths[i]);
+        if (t.trim()) parts.push(t.trim());
+      }
       setOcrState(null);
+      const text = parts.join("\n\n");
       if (!text.trim()) {
         setIsExtracting(false);
         setPicked(null);
-        Alert.alert("OCR", "No readable text was found in this image.");
+        Alert.alert("OCR", "No readable text was found.");
         return;
       }
       if (currentMetaRef.current) currentMetaRef.current.ocr = true;
       setPicked((p) => (p ? { ...p, ocr: true } : p));
-      const start = await applyTextForCurrentFile(fid, text, { extracted: true });
+      const startIdx = await applyTextForCurrentFile(fid, text, { extracted: true });
       setIsExtracting(false);
-      if (autoStart) setTimeout(() => speakFrom(start), 200);
+      if (autoStart) setTimeout(() => speakFrom(startIdx), 200);
     } catch (err: any) {
       setOcrState(null);
       setIsExtracting(false);
       setPicked(null);
       Alert.alert("OCR", String(err?.message ?? err ?? "Text recognition failed"));
+    }
+  };
+
+  // Several pictures shared at once (SEND_MULTIPLE)
+  const openSharedImages = async (files: { name: string; uri: string }[]) => {
+    await hardStop();
+    setSegments([]);
+    segmentsRef.current = [];
+    setChapters([]);
+    setRawText("");
+    const label = `${files.length} images`;
+    const fid = makeFileId(`images-${hashStr(files.map((f) => f.name).join("|"))}`, "image/*");
+    setFileId(fid);
+    fileIdRef.current = fid;
+    currentMetaRef.current = { name: label, kind: "image", source: "share", ocr: false };
+    setPicked({ name: label, uri: "", type: "image/*", kind: "image" });
+    setIsExtracting(true);
+    const paths: string[] = [];
+    try {
+      for (const f of files) paths.push(await copySharedUriToCache(f.uri, f.name));
+    } catch (e: any) {
+      setIsExtracting(false);
+      setPicked(null);
+      Alert.alert("Sharing", String(e?.message ?? e));
+      return;
+    }
+    await handleImages(fid, paths, true);
+  };
+
+  // ---- recordings: offline transcription (whisper.cpp)
+  const saveTextExport = async (title: string, text: string, as: "txt" | "pdf" | "share" | "cloud") => {
+    const base = safeFileName(title.replace(/\.[a-z0-9]{2,4}$/i, "")) + " (transcript)";
+    await RNFS.mkdir(`${RNFS.CachesDirectoryPath}/export`).catch(() => {});
+    try {
+      if (as === "cloud") {
+        const out = `${RNFS.CachesDirectoryPath}/export/${base}.pdf`;
+        await RNFS.unlink(out).catch(() => {});
+        await scanNative.makePdf({ out, mode: "text", title, text });
+        setCloudOpen({ file: { path: out, name: `${base}.pdf`, mime: "application/pdf" } });
+      } else if (as === "pdf") {
+        const out = `${RNFS.CachesDirectoryPath}/export/${base}.pdf`;
+        await RNFS.unlink(out).catch(() => {});
+        await scanNative.makePdf({ out, mode: "text", title, text });
+        const where = await scanNative.saveToDownloads(out, `${base}.pdf`, "application/pdf");
+        Alert.alert("Saved", `${base}.pdf\nis in ${where.replace(/\/[^/]+$/, "")}.`);
+      } else {
+        const out = `${RNFS.CachesDirectoryPath}/export/${base}.txt`;
+        await RNFS.writeFile(out, text, "utf8");
+        if (as === "share") await scanNative.shareFile(out, "text/plain", `${base}.txt`);
+        else {
+          const where = await scanNative.saveToDownloads(out, `${base}.txt`, "text/plain");
+          Alert.alert("Saved", `${base}.txt\nis in ${where.replace(/\/[^/]+$/, "")}.`);
+        }
+      }
+    } catch (e: any) {
+      Alert.alert("Export", String(e?.message ?? e));
+    }
+  };
+
+  const pickSpeechModel = async (current: WhisperModelKey, title: string, message: string) => {
+    const keys = Object.keys(WHISPER_MODELS) as WhisperModelKey[];
+    const have = await Promise.all(keys.map((k) => hasModel(k)));
+    const m = await askChoice(
+      title,
+      message,
+      "📦",
+      keys.map((k, i) => ({
+        key: k,
+        icon: k === "tiny" ? "⚡" : k === "base" ? "⚖️" : "🎯",
+        label: `${WHISPER_MODELS[k].label}${have[i] ? " · downloaded" : ""}`,
+        sub: WHISPER_MODELS[k].note,
+        color: k === current ? YELLOW : MINT,
+      }))
+    );
+    return m as WhisperModelKey | null;
+  };
+
+  const ensureSpeechModel = async (): Promise<WhisperModelKey | null> => {
+    let model = await getModelKey();
+    if (await hasModel(model)) return model;
+    const m = await pickSpeechModel(
+      model,
+      "SPEECH MODEL",
+      "Transcription runs on the phone with a whisper.cpp model. It is downloaded once (Wi‑Fi recommended); after that recordings never leave the device."
+    );
+    if (!m) return null;
+    model = m;
+    await setModelKey(model);
+    if (await hasModel(model)) return model;
+    setIsExtracting(true);
+    setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: 0 });
+    try {
+      await downloadModel(model, (f) => setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[model].note, progress: f }));
+      return model;
+    } catch (e: any) {
+      Alert.alert("Speech model", `${String(e?.message ?? e)}\n\nCheck the connection and try again.`);
+      return null;
+    } finally {
+      setTask(null);
+    }
+  };
+
+  const refreshSpeechModelLabel = async () => {
+    const k = await getModelKey();
+    setSpeechModelLabel(`${WHISPER_MODELS[k].label}${(await hasModel(k)) ? "" : " · not downloaded"}`);
+  };
+
+  const chooseSpeechModel = async () => {
+    setSettingsOpen(false);
+    const cur = await getModelKey();
+    const m = await pickSpeechModel(cur, "SPEECH MODEL", "Used to turn recordings into text on the phone. Bigger models are more accurate but slower.");
+    if (!m) return;
+    await setModelKey(m);
+    if (!(await hasModel(m))) {
+      const ok = await askChoice("DOWNLOAD NOW?", `${WHISPER_MODELS[m].note}. Wi‑Fi recommended.`, "📦", [
+        { key: "yes", icon: "⬇️", label: "Download", color: MINT },
+      ]);
+      if (ok === "yes") {
+        setIsExtracting(true);
+        setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: 0 });
+        try {
+          await downloadModel(m, (f) => setTask({ title: "DOWNLOADING THE MODEL", sub: WHISPER_MODELS[m].note, progress: f }));
+          // free the space of the other models
+          for (const k of Object.keys(WHISPER_MODELS) as WhisperModelKey[]) if (k !== m) await deleteModel(k);
+        } catch (e: any) {
+          Alert.alert("Speech model", String(e?.message ?? e));
+        } finally {
+          setTask(null);
+          setIsExtracting(false);
+        }
+      }
+    }
+    refreshSpeechModelLabel();
+  };
+
+  const handleAudio = async (fid: string, name: string, localPath: string, autoStart: boolean) => {
+    setIsExtracting(false);
+    const k = await askChoice(
+      "A RECORDING",
+      `${name}\n\nLeggiMi can turn speech into text right on the phone: nothing is uploaded.`,
+      "🎙️",
+      [{ key: "go", icon: "📝", label: "Transcribe to text", sub: "Then read it aloud, keep it in the Library, save it as TXT or PDF", color: MINT }]
+    );
+    if (k !== "go") { setPicked(null); return; }
+    const model = await ensureSpeechModel();
+    if (!model) { setIsExtracting(false); setPicked(null); return; }
+    setIsExtracting(true);
+    try {
+      const tr = await transcribeAudio(localPath, model, (stage, p) => {
+        if (stage === "decoding") setTask({ title: "LISTENING…", sub: "Decoding the audio" });
+        else if (stage === "loading") setTask({ title: "LISTENING…", sub: "Loading the speech model" });
+        else setTask({ title: "LISTENING…", sub: "Writing down what is said", progress: p ?? 0 });
+      });
+      setTask(null);
+      if (!tr.text.trim()) {
+        setIsExtracting(false);
+        setPicked(null);
+        Alert.alert("Transcription", "No speech was recognised in this recording.");
+        return;
+      }
+      const startIdx = await applyTextForCurrentFile(fid, tr.text, {});
+      setIsExtracting(false);
+      const next = await askChoice(
+        "TRANSCRIPT READY",
+        `${fmtDuration(tr.durationMs)} of audio${tr.language ? ` · language: ${tr.language}` : ""}. It is already saved in your Library.`,
+        "✅",
+        [
+          { key: "read", icon: "🔊", label: "Read it aloud", color: MINT },
+          { key: "txt", icon: "📄", label: "Save as text file", sub: "Download/LeggiMi", color: YELLOW },
+          { key: "pdf", icon: "📕", label: "Save as PDF", sub: "Download/LeggiMi", color: CORAL },
+          { key: "cloud", icon: "☁️", label: "Save to cloud", sub: "PDF in the LeggiMi folder of your cloud", color: GRAPE },
+          { key: "share", icon: "📤", label: "Share the text", color: SKY },
+        ]
+      );
+      if (next === "read" || (next === null && autoStart)) setTimeout(() => speakFrom(startIdx), 200);
+      else if (next === "txt" || next === "pdf" || next === "share" || next === "cloud") await saveTextExport(name, tr.text, next);
+    } catch (err: any) {
+      setTask(null);
+      setIsExtracting(false);
+      setPicked(null);
+      Alert.alert("Transcription", String(err?.message ?? err ?? "Transcription failed"));
     }
   };
 
@@ -1726,7 +1755,12 @@ function AppInner() {
       }
 
       if (IMAGE_EXTS.includes(ext) || (mime ?? "").startsWith("image/")) {
-        await openImageWithOcr(fid, name, localPath, autoStart);
+        await handleImages(fid, [localPath], autoStart);
+        return;
+      }
+
+      if (isAudio(name, mime)) {
+        await handleAudio(fid, name, localPath, autoStart);
         return;
       }
 
@@ -1808,6 +1842,14 @@ function AppInner() {
         if (processingShareRef.current) return;
         processingShareRef.current = true;
         try {
+          const uriOf = (x: any) =>
+            x?.contentUri || (x?.filePath ? (x.filePath.startsWith("file://") ? x.filePath : `file://${x.filePath}`) : null);
+          const nameOf = (x: any) => x?.fileName || x?.filePath?.split?.(/[\\/]/).pop?.() || "shared";
+          const images = files.filter((x) => uriOf(x) && (String(x?.mimeType || "").startsWith("image/") || IMAGE_EXTS.includes(extOf(nameOf(x)))));
+          if (files.length > 1 && images.length === files.length) {
+            await openSharedImages(images.map((x) => ({ name: nameOf(x), uri: uriOf(x) as string })));
+            return;
+          }
           const f = files[0];
           const name = f?.fileName || f?.filePath?.split?.(/[\\/]/).pop?.() || "shared";
           const mime = f?.mimeType || "";
@@ -1921,6 +1963,77 @@ function AppInner() {
   const docKind: DocKind = picked?.kind ?? kindOf(picked?.name ?? "", picked?.type, "picker");
   const docKindColor = kindColor(docKind);
 
+  // ---- scanner <-> library
+  const scanLibraryId = (scanId: string) => `scan::${scanId}`;
+
+  const onScanSaved = useCallback((d: ScanDoc) => {
+    const id = scanLibraryId(d.id);
+    const now = Date.now();
+    const prev = libraryRef.current.find((e) => e.id === id);
+    const pagesChanged = prev ? prev.pages !== d.pages.length : true;
+    const base: LibraryEntry = prev ?? {
+      id,
+      name: d.name,
+      kind: "scan",
+      source: "scan",
+      addedAt: now,
+      lastOpenedAt: now,
+      total: 0,
+      index: 0,
+      ocr: true,
+      markdown: false,
+      textPath: "",
+    };
+    const entry: LibraryEntry = {
+      ...base,
+      name: d.name,
+      kind: "scan",
+      source: "scan",
+      ocr: true,
+      scanId: d.id,
+      pages: d.pages.length,
+      lastOpenedAt: now,
+      // pages were added or removed: the cached text is stale until the next Read
+      textPath: prev && pagesChanged ? "" : base.textPath,
+    };
+    const next = [entry, ...libraryRef.current.filter((e) => e.id !== id)].slice(0, LIBRARY_MAX);
+    libraryRef.current = next;
+    setLibrary(next);
+    persistLibrary(next).catch(() => {});
+  }, []);
+
+  const onScanDeleted = useCallback((scanId: string) => {
+    const id = scanLibraryId(scanId);
+    const next = libraryRef.current.filter((e) => e.id !== id);
+    libraryRef.current = next;
+    setLibrary(next);
+    persistLibrary(next).catch(() => {});
+    AsyncStorage.removeItem(`progress:${id}`).catch(() => {});
+  }, []);
+
+  const onScanRead = async (d: ScanDoc, text: string) => {
+    setScanOpen(null);
+    setIsExtracting(true);
+    await hardStop();
+    setSegments([]);
+    segmentsRef.current = [];
+    setChapters([]);
+    setRawText("");
+    const id = scanLibraryId(d.id);
+    setPicked({ name: d.name, uri: "", type: "image/jpeg", kind: "scan", ocr: true });
+    setFileId(id);
+    fileIdRef.current = id;
+    currentMetaRef.current = { name: d.name, kind: "scan", source: "scan", ocr: true, scanId: d.id, pages: d.pages.length };
+    try {
+      const start = await applyTextForCurrentFile(id, text, { extracted: true });
+      setIsExtracting(false);
+      setTimeout(() => speakFrom(start), 250);
+    } catch (err: any) {
+      setIsExtracting(false);
+      Alert.alert("Scanner", String(err?.message ?? err ?? "Could not read the pages"));
+    }
+  };
+
   // Android 13+: the print service can only wave at you with a notification
   const askNotificationPermission = async () => {
     try {
@@ -1960,13 +2073,14 @@ function AppInner() {
 
       {/* HEADER */}
       <View style={s.header}>
-        <PosterTitle text="LEGGIMI" palette={palette} size={30} style={{ flex: 1 }} />
-        <ComicIconButton icon="📂" onPress={pickFile} disabled={busy} palette={palette} color={YELLOW} fontSize={20} style={s.headerBtn} />
-        <ComicIconButton icon="🕘" onPress={() => setLibraryOpen(true)} disabled={busy} palette={palette} color={TANGERINE} fontSize={20} style={s.headerBtn} />
+        <PosterTitle text="LEGGIMI" palette={palette} size={hasDoc ? 25 : 28} style={{ flex: 1 }} />
+        <ComicIconButton icon="📂" onPress={pickFile} disabled={busy} palette={palette} color={YELLOW} size={42} fontSize={18} style={s.headerBtn} />
+        <ComicIconButton icon="📷" onPress={() => setScanOpen({ docId: null, start: "camera" })} disabled={busy} palette={palette} color={BUBBLEGUM} size={42} fontSize={18} style={s.headerBtn} />
+        <ComicIconButton icon="🕘" onPress={() => setLibraryOpen(true)} disabled={busy} palette={palette} color={TANGERINE} size={42} fontSize={18} style={s.headerBtn} />
         {chapters.length > 1 && (
-          <ComicIconButton icon="☰" onPress={() => setChaptersOpen(true)} palette={palette} color={SKY} fontSize={20} style={s.headerBtn} />
+          <ComicIconButton icon="☰" onPress={() => setChaptersOpen(true)} palette={palette} color={SKY} size={42} fontSize={18} style={s.headerBtn} />
         )}
-        <ComicIconButton icon="Aa" onPress={() => setSettingsOpen(true)} palette={palette} color={MINT} fontSize={17} style={s.headerBtn} />
+        <ComicIconButton icon="Aa" onPress={() => setSettingsOpen(true)} palette={palette} color={MINT} size={42} fontSize={15} style={s.headerBtn} />
       </View>
 
       {/* DOCUMENT STICKER + PROGRESS */}
@@ -2008,7 +2122,7 @@ function AppInner() {
               <PosterTitle text="LISTEN TO YOUR" palette={palette} size={26} />
               <PosterTitle text="DOCUMENTS" palette={palette} size={26} />
               <Text style={s.emptyText}>
-                Open a PDF, Word, Markdown, TXT or RTF file — or share it to LeggiMi from any other app — and I will read it out loud.
+                Open a PDF, Word, Markdown, TXT or RTF file, scan paper pages, or share a photo or a recording from any other app — and I will read it out loud.
               </Text>
               <View style={s.kindRow}>
                 {[
@@ -2023,6 +2137,7 @@ function AppInner() {
                 ))}
               </View>
               <ComicButton text="OPEN A DOCUMENT" icon="📂" onPress={pickFile} palette={palette} color={YELLOW} style={{ marginTop: 18 }} />
+              <ComicButton text="SCAN PAGES" icon="📷" onPress={() => setScanOpen({ docId: null, start: "camera" })} palette={palette} color={BUBBLEGUM} style={{ marginTop: 12 }} />
               {library.length > 0 ? (
                 <ComicButton text={`LIBRARY · ${library.length}`} icon="🕘" onPress={() => setLibraryOpen(true)} palette={palette} color={TANGERINE} compact style={{ marginTop: 12 }} />
               ) : null}
@@ -2044,6 +2159,13 @@ function AppInner() {
                 </Text>
               </View>
               <ComicButton text="PRINT SETTINGS" onPress={openPrintSettings} palette={palette} color={palette.surface} compact style={{ alignSelf: "flex-start", marginTop: 8, marginLeft: 38 }} />
+            </ComicBox>
+
+            <ComicBox palette={palette} color={AQUA} radius={20} style={{ marginTop: 16 }} contentStyle={s.tipCard}>
+              <Text style={s.tipEmoji}>🎙️</Text>
+              <Text style={s.tipText}>
+                Recordings too: share a voice note or any audio file and LeggiMi writes it down <Text style={{ fontFamily: FONT_BOLD }}>on the phone</Text>, then reads it or saves it as TXT / PDF.
+              </Text>
             </ComicBox>
 
             <ComicBox palette={palette} color={BUBBLEGUM} radius={20} style={{ marginTop: 16 }} contentStyle={s.tipCard}>
@@ -2081,10 +2203,26 @@ function AppInner() {
           <View style={s.loadingOverlay}>
             <ComicBox palette={palette} color={YELLOW} radius={22} shadow={6} contentStyle={s.loadingCard}>
               <ActivityIndicator size="large" color={INK} />
-              <PosterTitle text={ocrState ? "READING THE PIXELS…" : "ONE MOMENT…"} palette={palette} size={22} color={INK} style={{ marginTop: 12 }} />
+              <PosterTitle
+                text={task ? task.title : ocrState ? "READING THE PIXELS…" : "ONE MOMENT…"}
+                palette={palette}
+                size={22}
+                color={INK}
+                style={{ marginTop: 12 }}
+              />
               <Text style={s.loadingText}>
-                {ocrState ? (ocrState.total > 1 ? `OCR · page ${ocrState.page} of ${ocrState.total}` : "OCR · recognising text") : "Extracting the text"}
+                {task
+                  ? task.sub ?? ""
+                  : ocrState
+                  ? ocrState.total > 1 ? `OCR · page ${ocrState.page} of ${ocrState.total}` : "OCR · recognising text"
+                  : "Extracting the text"}
               </Text>
+              {task && task.progress !== undefined ? (
+                <View style={[s.taskTrack, { borderColor: INK }]}>
+                  <View style={[s.taskFill, { width: `${Math.max(3, Math.round(task.progress * 100))}%` }]} />
+                </View>
+              ) : null}
+              {task && task.progress !== undefined ? <Text style={s.loadingSub}>{Math.round(task.progress * 100)}%</Text> : null}
               {picked?.name ? <Text style={s.loadingSub} numberOfLines={1}>{picked.name}</Text> : null}
             </ComicBox>
           </View>
@@ -2177,6 +2315,26 @@ function AppInner() {
               >
                 <Text style={s.rowSelectEmoji}>🗣️</Text>
                 <Text style={s.rowSelectText} numberOfLines={1}>{currentVoiceLabel}</Text>
+                <Text style={s.rowSelectChevron}>›</Text>
+              </ComicBox>
+
+              <Text style={s.sheetLabel}>Speech to text</Text>
+              <ComicBox palette={palette} radius={16} shadow={4} onPress={chooseSpeechModel} contentStyle={s.rowSelect}>
+                <Text style={s.rowSelectEmoji}>🎙️</Text>
+                <Text style={s.rowSelectText} numberOfLines={1}>{speechModelLabel || "Speech model"}</Text>
+                <Text style={s.rowSelectChevron}>›</Text>
+              </ComicBox>
+
+              <Text style={s.sheetLabel}>Cloud</Text>
+              <ComicBox
+                palette={palette}
+                radius={16}
+                shadow={4}
+                onPress={() => { setSettingsOpen(false); setCloudOpen({ file: null }); }}
+                contentStyle={s.rowSelect}
+              >
+                <Text style={s.rowSelectEmoji}>☁️</Text>
+                <Text style={s.rowSelectText} numberOfLines={1}>Cloud accounts</Text>
                 <Text style={s.rowSelectChevron}>›</Text>
               </ComicBox>
 
@@ -2310,15 +2468,43 @@ function AppInner() {
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text numberOfLines={1} style={s.libName}>{e.name}</Text>
                       <Text numberOfLines={1} style={s.libMeta}>
-                        {kindLabel(e.kind)}{e.ocr ? " · OCR" : ""} · {fmtDate(e.lastOpenedAt)} · {done ? "finished" : `block ${e.index + 1}/${e.total}`}
+                        {kindLabel(e.kind)}
+                        {e.scanId && e.pages ? ` · ${e.pages} page${e.pages === 1 ? "" : "s"}` : ""}
+                        {e.ocr && !e.scanId ? " · OCR" : ""} · {fmtDate(e.lastOpenedAt)} ·{" "}
+                        {e.scanId && !e.textPath ? "not read yet" : done ? "finished" : `block ${e.index + 1}/${e.total}`}
                       </Text>
                       <View style={[s.libTrack, { borderColor: palette.ink, backgroundColor: palette.surface }]}>
                         <View style={[s.libFill, { width: `${Math.max(pctE, 2)}%`, backgroundColor: done ? MINT : YELLOW }]} />
                       </View>
                     </View>
                     <View style={s.libRight}>
-                      <Text style={s.libPct}>{pctE}%</Text>
-                      <ComicIconButton icon="✕" onPress={() => removeFromLibrary(e)} palette={palette} color={palette.surface2} size={30} fontSize={13} />
+                      {e.scanId ? (
+                        <ComicIconButton
+                          icon="✎"
+                          onPress={() => { setLibraryOpen(false); setScanOpen({ docId: e.scanId!, start: null }); }}
+                          palette={palette}
+                          color={SKY}
+                          size={30}
+                          fontSize={14}
+                        />
+                      ) : (
+                        <Text style={s.libPct}>{pctE}%</Text>
+                      )}
+                      <ComicIconButton
+                        icon="✕"
+                        onPress={() =>
+                          e.scanId
+                            ? Alert.alert("Delete scan", `Delete “${e.name}” and its pages?`, [
+                                { text: "Cancel", style: "cancel" },
+                                { text: "Delete", style: "destructive", onPress: () => removeFromLibrary(e) },
+                              ])
+                            : removeFromLibrary(e)
+                        }
+                        palette={palette}
+                        color={palette.surface2}
+                        size={30}
+                        fontSize={13}
+                      />
                     </View>
                   </ComicBox>
                 );
@@ -2328,6 +2514,73 @@ function AppInner() {
           </ComicBox>
         </View>
       </Modal>
+
+      {/* CHOICE SHEET */}
+      <Modal visible={!!choice} transparent animationType="slide" onRequestClose={() => answerChoice(null)}>
+        <Pressable style={s.backdrop} onPress={() => answerChoice(null)} />
+        {choice ? (
+          <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "86%" }]}>
+            <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+              <View style={s.sheetHead}>
+                {choice.emoji ? <Text style={s.sheetEmoji}>{choice.emoji}</Text> : null}
+                <PosterTitle text={choice.title} palette={palette} size={24} style={{ flex: 1 }} />
+              </View>
+              {choice.message ? <Text style={[s.voiceHint, { marginBottom: 6 }]}>{choice.message}</Text> : null}
+              <ScrollView style={{ marginTop: 8, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+                {choice.options.map((o) => (
+                  <ComicBox
+                    key={o.key}
+                    palette={palette}
+                    radius={16}
+                    stroke={3}
+                    shadow={4}
+                    onPress={() => answerChoice(o.key)}
+                    style={s.listItem}
+                    contentStyle={s.libRow}
+                  >
+                    <View style={[s.libIcon, { backgroundColor: o.color, borderColor: palette.ink }]}>
+                      <Text style={{ fontSize: 20 }}>{o.icon}</Text>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={s.libName}>{o.label}</Text>
+                      {o.sub ? <Text style={s.libMeta}>{o.sub}</Text> : null}
+                    </View>
+                  </ComicBox>
+                ))}
+              </ScrollView>
+              <ComicButton text="CANCEL" onPress={() => answerChoice(null)} palette={palette} color={palette.surface2} style={{ marginTop: 10 }} />
+            </ComicBox>
+          </View>
+        ) : null}
+      </Modal>
+
+      {/* SCANNER (CamScanner-like) */}
+      {scanOpen ? (
+        <ScanStudio
+          visible
+          docId={scanOpen.docId}
+          start={scanOpen.start}
+          images={scanOpen.images}
+          imagesMode={scanOpen.imagesMode}
+          palette={palette}
+          insetTop={insets.top}
+          insetBottom={insets.bottom}
+          onClose={() => setScanOpen(null)}
+          onSaved={onScanSaved}
+          onDeleted={onScanDeleted}
+          onRead={onScanRead}
+          onCloudExport={(f) => setCloudOpen({ file: f })}
+        />
+      ) : null}
+
+      {/* CLOUD ACCOUNTS / UPLOAD */}
+      <CloudSheet
+        visible={!!cloudOpen}
+        palette={palette}
+        bottomInset={insets.bottom}
+        file={cloudOpen?.file ?? null}
+        onClose={() => setCloudOpen(null)}
+      />
 
       {/* PDF extractor offline (hidden). Also renders pages for OCR on request. */}
       {pdfBase64 && (
@@ -2540,6 +2793,8 @@ function makeStyles(p: Palette) {
     },
     loadingCard: { alignItems: "center", paddingHorizontal: 26, paddingVertical: 24, minWidth: 240 },
     loadingText: { color: INK, fontSize: 15, fontFamily: FONT_BOLD, marginTop: 4 },
+    taskTrack: { alignSelf: "stretch", height: 14, borderRadius: 8, borderWidth: 3, backgroundColor: PAPER, overflow: "hidden", marginTop: 12 },
+    taskFill: { height: "100%", backgroundColor: MINT },
     loadingSub: { color: INK, opacity: 0.75, fontSize: 12.5, marginTop: 6, maxWidth: 220, fontFamily: FONT_BODY },
 
     transportWrap: { marginHorizontal: 16 },

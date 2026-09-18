@@ -111,6 +111,11 @@ dependencies {
     implementation("com.facebook.react:react-android")
     // FileProvider used by the LeggiMi print service to hand PDFs to the app
     implementation("androidx.core:core:1.13.1")
+    // CamScanner-like capture: auto edges, corners, filters, multi page (Play services, on device)
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+    // cloud export: Google sign-in for Drive, OkHttp (same version React Native ships) for WebDAV/Drive/Dropbox
+    implementation("com.google.android.gms:play-services-auth:21.5.1")
+    implementation("com.squareup.okhttp3:okhttp:4.9.2")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
