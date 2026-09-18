@@ -2773,7 +2773,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       <Modal visible={settingsOpen} transparent animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setSettingsOpen(false)} />
         <View style={[s.sheetWrap, { bottom: sheetBottom }]}>
-          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+          <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={s.sheetHead}>
                 <Text style={s.sheetEmoji}>⚙️</Text>
@@ -2858,12 +2858,12 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       <Modal visible={chaptersOpen} transparent animationType="slide" onRequestClose={() => setChaptersOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setChaptersOpen(false)} />
         <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "72%" }]}>
-          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+          <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
             <View style={s.sheetHead}>
               <Text style={s.sheetEmoji}>📑</Text>
               <PosterTitle text="CONTENTS" palette={palette} size={26} />
             </View>
-            <ScrollView style={{ marginTop: 4, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+            <ScrollView style={{ marginTop: 4, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
               {chapters.map((ch, idx) => {
                 const active = idx === currentChapterIdx;
                 return (
@@ -2895,13 +2895,13 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       <Modal visible={voicesOpen} transparent animationType="slide" onRequestClose={() => setVoicesOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setVoicesOpen(false)} />
         <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "78%" }]}>
-          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+          <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
             <View style={s.sheetHead}>
               <Text style={s.sheetEmoji}>🗣️</Text>
               <PosterTitle text="VOICE" palette={palette} size={26} />
             </View>
             <Text style={s.voiceHint}>Tap a voice to hear a preview. Your choice is saved automatically.</Text>
-            <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+            <ScrollView style={{ marginTop: 10, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
               <ComicBox
                 palette={palette}
                 color={!voiceId ? YELLOW : palette.surface}
@@ -2953,7 +2953,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       <Modal visible={libraryOpen} transparent animationType="slide" onRequestClose={() => setLibraryOpen(false)}>
         <Pressable style={s.backdrop} onPress={() => setLibraryOpen(false)} />
         <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "86%" }]}>
-          <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+          <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
             <View style={s.sheetHead}>
               <Text style={s.sheetEmoji}>🕘</Text>
               <PosterTitle text="LIBRARY" palette={palette} size={26} style={{ flex: 1 }} />
@@ -2975,7 +2975,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             ) : (
               <Text style={s.voiceHint}>Tap a document to pick up where you left off. 📤 saves or sends it, ☁️ moves it to your cloud.</Text>
             )}
-            <ScrollView style={{ marginTop: 10, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+            <ScrollView style={{ marginTop: 10, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
               {library.map((e) => {
                 const pctE = e.total ? Math.round(((e.index + 1) / e.total) * 100) : 0;
                 const done = e.total > 0 && e.index >= e.total - 1;
@@ -3055,13 +3055,13 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         <Pressable style={s.backdrop} onPress={() => answerChoice(null)} />
         {choice ? (
           <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "86%" }]}>
-            <ComicBox palette={palette} radius={26} shadow={6} contentStyle={s.sheet}>
+            <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
               <View style={s.sheetHead}>
                 {choice.emoji ? <Text style={s.sheetEmoji}>{choice.emoji}</Text> : null}
                 <PosterTitle text={choice.title} palette={palette} size={24} style={{ flex: 1 }} />
               </View>
               {choice.message ? <Text style={[s.voiceHint, { marginBottom: 6 }]}>{choice.message}</Text> : null}
-              <ScrollView style={{ marginTop: 8, flexGrow: 0 }} showsVerticalScrollIndicator={false}>
+              <ScrollView style={{ marginTop: 8, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
                 {choice.options.map((o) => (
                   <ComicBox
                     key={o.key}
@@ -3350,7 +3350,9 @@ function makeStyles(p: Palette) {
 
     backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "#17161A99" },
     sheetWrap: { position: "absolute", left: 12, right: 12, maxHeight: "88%" },
-    sheet: { paddingHorizontal: 18, paddingTop: 16, paddingBottom: 18 },
+    // the sheet never grows past sheetWrap's maxHeight: its list scrolls instead
+    sheetBox: { flexShrink: 1 },
+    sheet: { paddingHorizontal: 18, paddingTop: 16, paddingBottom: 18, flexShrink: 1 },
     sheetHead: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 6 },
     sheetEmoji: { fontSize: 26 },
     sheetLabel: { color: p.text, fontSize: 14, marginTop: 16, marginBottom: 10, fontFamily: FONT_BOLD },
