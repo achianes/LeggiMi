@@ -65,7 +65,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Block karaoke**: the block being spoken turns into a yellow sticker and the view follows along. Tap any block to read from there.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
 - **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences.
-- **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
+- **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings; dot leaders are not needed, numbered titles like “7. Back home” are chapters rather than list items, titles wrapped on two lines are glued back, and the index itself is not read aloud); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
 - **Voices**: every installed TTS voice, the phone's language first, with a one-tap preview.
 - **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2×.
 

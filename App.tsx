@@ -125,6 +125,10 @@ function xmlToText(xml: string) {
   );
 }
 
+/** First line of a cleaned text whose chapters come from its table of contents. */
+const TOC_MARK = "<!--toc-->";
+const stripMarkers = (text: string) => (text.startsWith(TOC_MARK) ? text.slice(TOC_MARK.length).trim() : text);
+
 function postCleanExtractedText(raw: string) {
   let t = raw
     .replace(/\r/g, "")
@@ -147,8 +151,56 @@ function postCleanExtractedText(raw: string) {
   // but their titles tell us which lines of the body are chapter headings.
   const tocTitles: string[] = [];
 
+  // Tables of contents without dot leaders, e.g.
+  //   Indice
+  //   1. Primo giorno 1          (page on the same line)
+  //   2. Che puzza di nafta
+  //   29                         (or on the next line)
+  // Found after an "Indice / Sommario / Contents" line: at least 3 entries.
+  const tocSkip = new Set<number>();
+  const TOC_HEADER = /^(indice|indice generale|sommario|contents|table of contents|index)$/i;
+  for (let i = 0; i < lines.length; i++) {
+    if (!TOC_HEADER.test(lines[i])) continue;
+    const found: string[] = [];
+    const used: number[] = [i];
+    let pending: string[] = [];
+    let pendingIdx: number[] = [];
+    for (let j = i + 1; j < lines.length && j < i + 600; j++) {
+      const l = lines[j];
+      if (!l) continue;
+      if (/^\d{1,4}$/.test(l)) {
+        used.push(j);
+        if (pending.length) {
+          found.push(pending.join(" "));
+          used.push(...pendingIdx);
+          pending = [];
+          pendingIdx = [];
+        }
+        continue;
+      }
+      const withPage = l.match(/^(.*\S)\s+(\d{1,4})$/);
+      if (withPage && withPage[1].length <= 150 && withPage[1].replace(/[\d\s.]/g, "").length >= 3) {
+        found.push([...pending, withPage[1]].join(" "));
+        used.push(...pendingIdx, j);
+        pending = [];
+        pendingIdx = [];
+        continue;
+      }
+      // a title may wrap on two lines; three plain lines in a row = the body started
+      if (l.length > 150 || pending.length >= 2) break;
+      pending.push(l);
+      pendingIdx.push(j);
+    }
+    if (found.length >= 3) {
+      tocTitles.push(...found);
+      used.forEach((k) => tocSkip.add(k));
+    }
+  }
+
   const cleanedLines: string[] = [];
-  for (const l of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
+    if (tocSkip.has(li)) continue;
     const low = l.toLowerCase();
     if (!l) { cleanedLines.push(""); continue; }
     if (/^\d{1,4}(\s*\/\s*\d{1,4})?$/.test(l)) continue; // page numbers
@@ -192,6 +244,13 @@ function postCleanExtractedText(raw: string) {
     }
     return false;
   };
+  // the first half of a TOC title split over two lines
+  const isTocPrefix = (line: string) => {
+    const n = normTitle(line.replace(/^#{1,6}\s+/, ""));
+    if (n.length < 6) return false;
+    for (const t of tocSet) if (t.startsWith(n) && t.length > n.length) return true;
+    return false;
+  };
   const merged: string[] = [];
   for (const l of cleanedLines) {
     if (!l) { merged.push(""); continue; }
@@ -200,6 +259,21 @@ function postCleanExtractedText(raw: string) {
     while (j >= 0 && merged[j] === "") { j--; blanks++; }
     if (j >= 0) {
       const prev = merged[j];
+      // a chapter title split on two lines ("7. Ritorno a casa, tutto come" +
+      // "prima, anzi peggio…"): glue it back when together it is a TOC title
+      // (the larger title font often leaves a blank line between the halves)
+      if (
+        tocSet.size &&
+        blanks <= 2 &&
+        !isTocTitle(prev) &&
+        !isTocTitle(l) &&
+        isTocPrefix(prev) &&
+        isTocTitle(`${prev} ${l}`)
+      ) {
+        merged.length = j + 1;
+        merged[j] = `${prev} ${l}`;
+        continue;
+      }
       const startsLower = /^[a-zà-öø-ÿ]/.test(l);
       const prevOpen = !TERMINAL.test(prev);
       // a long line ending mid-sentence (lowercase letter or comma) continues
@@ -228,11 +302,24 @@ function postCleanExtractedText(raw: string) {
       const m = merged[i];
       if (m && !m.startsWith("#") && isTocTitle(m)) merged[i] = `## ${m}`;
     }
+  } else {
+    // no table of contents: an isolated "12. Some title" line (not part of a
+    // numbered list) is a chapter heading rather than a list item
+    const NUMBERED = /^\d{1,3}[.)]\s/;
+    const near = (i: number, step: number) => {
+      for (let k = i + step; k >= 0 && k < merged.length; k += step) if (merged[k]) return merged[k];
+      return "";
+    };
+    for (let i = 0; i < merged.length; i++) {
+      const m = merged[i];
+      if (!m || !/^\d{1,3}\.\s+\p{Lu}/u.test(m) || m.length > 90 || /[.;,:]$/.test(m)) continue;
+      if (!NUMBERED.test(near(i, -1)) && !NUMBERED.test(near(i, 1))) merged[i] = `## ${m}`;
+    }
   }
 
   let out = merged.join("\n");
   out = out.replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
-  return out;
+  return tocSet.size ? `${TOC_MARK}\n${out}` : out;
 }
 
 async function extractDocxText(localPath: string) {
@@ -312,7 +399,11 @@ function splitMdBlock(block: string): string[] {
 }
 
 function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, maxChars = 280, minMerge = 45): string[] {
-  const t = normalizeText(raw);
+  let t = normalizeText(raw);
+  // text whose chapters come from its table of contents: trust those and do
+  // not turn every UPPERCASE line (title page, author) into a chapter
+  const tocDriven = t.startsWith(TOC_MARK);
+  if (tocDriven) t = t.slice(TOC_MARK.length).trim();
   if (!t) return [];
   const markdown = !!opts.markdown;
 
@@ -332,7 +423,7 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
     }
     // Plain sources (PDF, DOCX, TXT): promote detected titles to Markdown headings
     // so the reader shows them as such. In Markdown files only "#" counts.
-    if (!markdown && isChapterHeading(firstLine) && block.length <= 90 && !block.includes("\n")) {
+    if (!markdown && (tocDriven ? isStrongHeading(firstLine) : isChapterHeading(firstLine)) && block.length <= 90 && !block.includes("\n")) {
       out.push(`## ${block}`);
       continue;
     }
@@ -366,10 +457,24 @@ function segmentIntoSentences(raw: string, opts: { markdown?: boolean } = {}, ma
   return out.filter(Boolean);
 }
 
+// Front/back matter titles that open a section on their own line
+const SECTION_WORDS =
+  /^(prefazione|introduzione|premessa|prologo|epilogo|postfazione|ringraziamenti|conclusioni?|appendice|nota dell['’]autore|preface|introduction|foreword|prologue|epilogue|afterword|acknowledg(e)?ments|conclusions?|appendix)(\s*[–—:-]\s*\S.*)?$/i;
+
+/** Headings that are headings in any case (with or without a table of contents). */
+function isStrongHeading(line: string) {
+  const s = (line || "").trim();
+  if (s.length < 3 || s.length > 80) return false;
+  if (/^#{1,6}\s+/.test(s)) return true;
+  if (SECTION_WORDS.test(s)) return true;
+  return /^([Cc]apitolo|[Pp]arte|[Ss]ezione|[Aa]rticolo|[Cc]hapter|[Ss]ection|[Pp]art|CAPITOLO|PARTE|SEZIONE|ARTICOLO|CHAPTER|SECTION|PART)\s+(\d{1,4}|[IVXLCDM]{1,7})(?=$|[\s.:;,–—-])/.test(s);
+}
+
 function isChapterHeading(line: string) {
   const s = (line || "").trim();
   if (s.length < 3) return false;
   if (/^#{1,6}\s+/.test(s)) return true;
+  if (isStrongHeading(s)) return true;
   // "Capitolo 3", "Parte II", "Chapter 12 – Title": roman numerals must be
   // uppercase, otherwise "parte di un vetro" would look like "Parte DI".
   if (s.length <= 80 && /^([Cc]apitolo|[Pp]arte|[Ss]ezione|[Aa]rticolo|[Cc]hapter|[Ss]ection|[Pp]art|CAPITOLO|PARTE|SEZIONE|ARTICOLO|CHAPTER|SECTION|PART)\s+(\d{1,4}|[IVXLCDM]{1,7})(?=$|[\s.:;,–—-])/.test(s)) return true;
@@ -1693,7 +1798,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
     if (k !== "pdf" && k !== "txt") return;
     try {
-      const text = await RNFS.readFile(e.textPath, "utf8");
+      const text = stripMarkers(await RNFS.readFile(e.textPath, "utf8"));
       await saveTextExport(e.name, text, k, e.kind === "audio" ? " (transcript)" : "");
     } catch {
       Alert.alert("Export", "The saved text of this document is gone. Open it again from its app.");
@@ -1730,7 +1835,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
           pages: doc.pages.map((pg) => ({ path: pg.rendered, imgW: pg.w, imgH: pg.h, lines: searchable ? pg.ocr?.lines ?? [] : [] })),
         });
       } else if (e.textPath) {
-        const text = await RNFS.readFile(e.textPath, "utf8");
+        const text = stripMarkers(await RNFS.readFile(e.textPath, "utf8"));
         await scanNative.makePdf({ out, mode: "text", title: e.name, text });
       } else {
         throw new Error("Nothing to move yet.");
