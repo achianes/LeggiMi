@@ -75,6 +75,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Word by word**: inside the highlighted sentence the word being spoken is underlined (system voices report it; natural voices estimate it from the playback position).
 - **Keeps reading in the background**: with the screen off, in another app, in the car. A media card with Previous · Play/Pause · Next · Stop sits in the notification shade and on the lock screen; headset buttons work; a phone call pauses the reading and it resumes when the call ends; unplugging the headphones pauses it.
 - **Sleep timer**: 15, 30, 45 or 60 minutes, or “end of chapter”. The countdown shows in the document card; Play resumes from the very sentence where it stopped.
+- **Translate**: from the Library, 📤 › **Translate…** turns a whole document into another language on the phone (ML Kit; a ~30 MB pack per language is downloaded once). Headings, list items and paragraphs keep their shape, so the translation opens with the same chapters as the original; it is added to the Library and can be saved as PDF or TXT in Download/LeggiMi and then sent to your cloud. Eighteen languages, source detected automatically.
 - **Audiobook**: from the Library, 📤 › **Audiobook (.m4a)** turns the whole document into one AAC file spoken by the natural voice, saved in Download/LeggiMi and then, if you like, sent to the cloud or shared.
 - **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2× (natural voices follow it too).
 
@@ -289,6 +290,7 @@ src/cloud/sync.ts                     # reading positions shared between devices
 src/speech/piper.ts                   # natural voices: catalogue, download/unpack, speak, audiobook
 src/docs/epub.ts                      # EPUB: spine, table of contents, XHTML -> Markdown
 src/docs/webpage.ts                   # shared links: in-WebView article extraction
+src/translate/translate.ts            # document translation keeping the Markdown shape
 src/playback/playback.ts              # media card / background reading bridge
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
@@ -303,6 +305,7 @@ android/app/src/main/java/com/leggimimobile/
   piper/LeggiMiPiperModule.kt         # sherpa-onnx Piper voices: unpack, load, speak, WAV synthesis
   piper/AacEncoder.kt                 # WAV -> .m4a with MediaCodec
   live/LiveReadActivity.kt            # camera preview + live text recognition (CameraX, ML Kit)
+  translate/LeggiMiTranslateModule.kt # ML Kit on-device translation + language id
 android/app/libs/sherpa-onnx-*.aar    # sherpa-onnx runtime (onnxruntime + JNI)
 android/app/src/main/assets/pdfjs/    # offline pdf.js
 android/app/src/main/assets/fonts/    # Luckiest Guy + Comic Neue
@@ -314,7 +317,7 @@ docs/icon/generate_icons.py           # renders the icon to the legacy PNGs
 
 ## Tech stack
 
-React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with [Piper](https://github.com/rhasspy/piper) voices · Android MediaSession / MediaCodec · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner) · whisper.cpp via whisper.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
+React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with [Piper](https://github.com/rhasspy/piper) voices · Android MediaSession / MediaCodec · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner, Translation, Language ID) · whisper.cpp via whisper.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
 
 Fonts: [Luckiest Guy](https://fonts.google.com/specimen/Luckiest+Guy) and [Comic Neue](https://fonts.google.com/specimen/Comic+Neue) (SIL Open Font License).
 

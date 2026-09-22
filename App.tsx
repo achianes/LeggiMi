@@ -40,6 +40,7 @@ import {
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
 import { extractEpub } from "./src/docs/epub";
+import { LANGS, langName as translationLangName, detectLanguage, translateDocument, cancelTranslation, translateAvailable } from "./src/translate/translate";
 import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
 import {
@@ -2437,6 +2438,56 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
   };
 
+  // Library: translate a document on the phone. Headings, list items and
+  // paragraphs keep their shape, so the translation has the same chapters.
+  const translateFromLibrary = async (e: LibraryEntry) => {
+    if (!translateAvailable()) { Alert.alert("Translate", "Not available in this build."); return; }
+    let raw = "";
+    try { raw = await RNFS.readFile(e.textPath, "utf8"); }
+    catch { Alert.alert("Translate", "The saved text of this document is gone. Open it again from its app."); return; }
+    const segs = segmentIntoSentences(raw, { markdown: !!e.markdown });
+    if (!segs.length) { Alert.alert("Translate", "Nothing to translate in this document."); return; }
+    const starts = PARA_STARTS.get(segs) ?? segs.map(() => true);
+    const sample = segs.slice(0, 40).map(mdToPlain).join(" ").slice(0, 4000);
+    const from = (await detectLanguage(sample)) ?? DEVICE_LANG.toLowerCase().split(/[-_]/)[0];
+    const to = await askChoice(
+      "TRANSLATE INTO…",
+      `“${e.name}” is in ${translationLangName(from)}. The translation runs on the phone; the first time, a language pack (about 30 MB) is downloaded for each language.`,
+      "🌍",
+      LANGS.filter((l) => l.code !== from).map((l) => ({ key: l.code, icon: l.flag, label: l.name, color: palette.surface }))
+    );
+    if (!to) return;
+    await hardStop();
+    setIsExtracting(true);
+    setTask({ title: "TRANSLATING", sub: `${translationLangName(from)} → ${translationLangName(to)} · getting the language packs`, cancel: cancelTranslation });
+    let result: { segs: string[]; text: string };
+    try {
+      result = await translateDocument(segs, starts, from, to, (done, total) =>
+        setTask({ title: "TRANSLATING", sub: `${translationLangName(from)} → ${translationLangName(to)} · ${done} / ${total}`, progress: total ? done / total : 0, cancel: cancelTranslation })
+      );
+    } catch (err: any) {
+      setTask(null);
+      setIsExtracting(false);
+      const msg = String(err?.message ?? err);
+      if (!/cancel/i.test(msg)) Alert.alert("Translate", msg);
+      return;
+    }
+    setTask(null);
+    setIsExtracting(false);
+    const title = `${e.name.replace(/\.[a-z0-9]{2,4}$/i, "")} (${translationLangName(to)})`;
+    await openSharedText(title, result.text, false, e.kind === "scan" ? "text" : e.kind);
+    const next = await askChoice(
+      "TRANSLATED",
+      `“${title}” is in the Library with the same chapters as the original. Save it as a file too? It goes to Download/LeggiMi first, then to your cloud or another app.`,
+      "✅",
+      [
+        { key: "pdf", icon: "📕", label: "Save as PDF", sub: "Then cloud or share", color: CORAL },
+        { key: "txt", icon: "📄", label: "Save as text (.txt)", sub: "Then cloud or share", color: YELLOW },
+      ]
+    );
+    if (next === "pdf" || next === "txt") await saveTextExport(title, result.text, next, "");
+  };
+
   // Library: save a document (always to Download/LeggiMi first), then cloud or share
   const exportFromLibrary = async (e: LibraryEntry) => {
     setLibraryOpen(false);
@@ -2448,7 +2499,8 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       opts.push(
         { key: "pdf", icon: "📕", label: "Text as PDF", sub: "Saved in Download/LeggiMi, then cloud or share", color: CORAL },
         { key: "txt", icon: "📄", label: "Text file (.txt)", sub: "Saved in Download/LeggiMi, then cloud or share", color: YELLOW },
-        { key: "audio", icon: "🎧", label: "Audiobook (.m4a)", sub: "Spoken by the natural voice, saved in Download/LeggiMi", color: MINT }
+        { key: "audio", icon: "🎧", label: "Audiobook (.m4a)", sub: "Spoken by the natural voice, saved in Download/LeggiMi", color: MINT },
+        { key: "translate", icon: "🌍", label: "Translate…", sub: "On the phone; headings and chapters are kept", color: GRAPE }
       );
     }
     if (!opts.length) {
@@ -2461,6 +2513,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       return;
     }
     if (k === "audio") { await exportAudiobook(e); return; }
+    if (k === "translate") { await translateFromLibrary(e); return; }
     if (k !== "pdf" && k !== "txt") return;
     try {
       const text = stripMarkers(await RNFS.readFile(e.textPath, "utf8"));
@@ -2827,7 +2880,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
   useEffect(() => { linkFetchRef.current = linkFetch; }, [linkFetch]);
 
   // Text that arrives without a file (share sheet "text" payload).
-  const openSharedText = async (title: string, text: string, autoStart: boolean, kind: "text" | "web" = "text", uri = "") => {
+  const openSharedText = async (title: string, text: string, autoStart: boolean, kind: DocKind = "text", uri = "") => {
     setIsExtracting(true);
     await hardStop();
     setSegments([]);
