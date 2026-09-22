@@ -1919,6 +1919,18 @@ function AppInner() {
   const aiRef = useRef<AiState | null>(null);
   useEffect(() => { aiRef.current = ai; }, [ai]);
   const [llmKey, setLlmKeyState] = useState<LlmKey>("gemma1b");
+  // language of the answers: the text's own (auto) or a fixed one
+  type LlmLang = "auto" | "it" | "en";
+  const [llmLang, setLlmLangState] = useState<LlmLang>("auto");
+  const llmLangRef = useRef<LlmLang>("auto");
+  useEffect(() => {
+    AsyncStorage.getItem("settings:llmLang").then((v) => {
+      const l: LlmLang = v === "it" || v === "en" ? v : "auto";
+      setLlmLangState(l);
+      llmLangRef.current = l;
+    }).catch(() => {});
+  }, []);
+  const setLlmLang = (l: LlmLang) => { setLlmLangState(l); llmLangRef.current = l; AsyncStorage.setItem("settings:llmLang", l).catch(() => {}); };
   const [llmReady, setLlmReady] = useState(false);
   const refreshLlm = useCallback(async () => {
     const k = await getLlmKey();
@@ -1987,7 +1999,7 @@ function AppInner() {
       aiRef.current = cur;
     }
     const passage = kind === "summary" ? passageFor(cur.index, true) : kind === "meaning" ? mdToPlain(segmentsRef.current[cur.index] ?? "") : passageFor(cur.index, false);
-    const lang = (await detectLanguage(passage.slice(0, 2000))) ?? cur.lang;
+    const lang = llmLangRef.current !== "auto" ? llmLangRef.current : (await detectLanguage(passage.slice(0, 2000))) ?? cur.lang;
     setAi((a) => (a ? { ...a, kind, passage, lang, answer: "", busy: true, stage: "Loading the model…" } : a));
     try {
       const k = await getLlmKey();
@@ -3629,6 +3641,12 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 </View>
                 <Text style={s.rowSelectChevron}>›</Text>
               </ComicBox>
+              <Text style={[s.voiceHint, { marginTop: 10 }]}>Answers in</Text>
+              <View style={s.chipRow}>
+                <ComicChip text="The text's language" selected={llmLang === "auto"} onPress={() => setLlmLang("auto")} palette={palette} color={YELLOW} />
+                <ComicChip text="Italian" selected={llmLang === "it"} onPress={() => setLlmLang("it")} palette={palette} color={MINT} />
+                <ComicChip text="English" selected={llmLang === "en"} onPress={() => setLlmLang("en")} palette={palette} color={SKY} />
+              </View>
 
               <ComicButton text="DONE" onPress={() => setSettingsOpen(false)} palette={palette} color={MINT} style={{ marginTop: 24 }} />
             </ScrollView>
