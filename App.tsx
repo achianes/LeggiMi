@@ -40,6 +40,7 @@ import {
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
 import { extractEpub } from "./src/docs/epub";
+import { LLM_MODELS, LLM_DEFAULT, hasLlm, deleteLlm, downloadLlm, cancelLlmDownload, loadLlm, askLlm, stopLlm, AskKind } from "./src/ai/llm";
 import { LANGS, langName as translationLangName, detectLanguage, translateDocument, cancelTranslation, translateAvailable } from "./src/translate/translate";
 import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
@@ -937,6 +938,8 @@ type RowProps = {
   palette: Palette;
   onPress: (i: number) => void;
   word?: SpokenWord | null;
+  /** long press: ask the assistant about this block */
+  onAsk?: (i: number) => void;
 };
 /** Inline Markdown (bold, italic, code, strike, links) as nested Text spans. */
 function renderInline(text: string, base: TextStyle, palette: Palette, strong: boolean): React.ReactNode[] {
@@ -1041,12 +1044,12 @@ function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps)
 }
 
 const SegmentRow = React.memo(function SegmentRow({
-  text, index, active, fontSize, palette, onPress, word,
+  text, index, active, fontSize, palette, onPress, word, onAsk,
 }: RowProps) {
   if (active) {
     // the block being read becomes a yellow sticker
     return (
-      <Pressable onPress={() => onPress(index)} style={rowStyles.activeWrap}>
+      <Pressable onPress={() => onPress(index)} onLongPress={() => onAsk?.(index)} style={rowStyles.activeWrap}>
         <View pointerEvents="none" style={[rowStyles.activeShadow, { backgroundColor: palette.shadow }]} />
         <View style={[rowStyles.activeCard, { backgroundColor: palette.hlBg, borderColor: palette.ink }]}>
           <MdBlock text={text} fontSize={fontSize} color={palette.hlText} palette={palette} strong word={word} />
@@ -1055,7 +1058,7 @@ const SegmentRow = React.memo(function SegmentRow({
     );
   }
   return (
-    <Pressable onPress={() => onPress(index)} style={rowStyles.row}>
+    <Pressable onPress={() => onPress(index)} onLongPress={() => onAsk?.(index)} style={rowStyles.row}>
       <MdBlock text={text} fontSize={fontSize} color={palette.text} palette={palette} strong={false} />
     </Pressable>
   );
@@ -1073,20 +1076,21 @@ type ParaRowProps = {
   onPress: (i: number) => void;
   /** the word being spoken, when the active sentence is in this row */
   word?: SpokenWord | null;
+  onAsk?: (i: number) => void;
 };
 
 /** A paragraph: its sentences flow as one text, the one being read is highlighted in place. */
 const ParagraphRow = React.memo(function ParagraphRow({
-  all, start, end, cont, activeIdx, fontSize, palette, onPress, word,
+  all, start, end, cont, activeIdx, fontSize, palette, onPress, word, onAsk,
 }: ParaRowProps) {
   const segs = all.slice(start, end);
   if (segs.length === 1 && !cont) {
     // a paragraph of one block (or a heading, a list…): being read, it becomes the yellow sticker
     if (activeIdx === start) {
-      return <SegmentRow text={segs[0]} index={start} active fontSize={fontSize} palette={palette} onPress={onPress} word={word} />;
+      return <SegmentRow text={segs[0]} index={start} active fontSize={fontSize} palette={palette} onPress={onPress} word={word} onAsk={onAsk} />;
     }
     return (
-      <Pressable onPress={() => onPress(start)} style={rowStyles.para}>
+      <Pressable onPress={() => onPress(start)} onLongPress={() => onAsk?.(start)} style={rowStyles.para}>
         <MdBlock text={segs[0]} fontSize={fontSize} color={palette.text} palette={palette} strong={false} />
       </Pressable>
     );
@@ -1103,6 +1107,7 @@ const ParagraphRow = React.memo(function ParagraphRow({
             <Text
               key={i}
               onPress={() => onPress(i)}
+              onLongPress={() => onAsk?.(i)}
               style={active ? { backgroundColor: palette.hlBg, color: palette.hlText } : undefined}
             >
               {active ? renderWithWord(t, word, body, palette, active) : renderInline(t, body, palette, false)}
@@ -1906,6 +1911,109 @@ function AppInner() {
     const lang = (id ? voices.find((v) => v.id === id)?.language : DEVICE_LANG) || DEVICE_LANG;
     const phrase = lang.toLowerCase().startsWith("it") ? "Ciao, questa è la voce selezionata." : "Hi, this is the selected voice.";
     try { await Tts.speak(phrase); } catch {}
+  };
+
+  // ---- Assistant: a small language model on the phone explains what is read
+  type AiState = { index: number; passage: string; kind: AskKind | null; answer: string; busy: boolean; stage: string; lang: string };
+  const [ai, setAi] = useState<AiState | null>(null);
+  const aiRef = useRef<AiState | null>(null);
+  useEffect(() => { aiRef.current = ai; }, [ai]);
+  const [llmReady, setLlmReady] = useState(false);
+  useEffect(() => { hasLlm().then(setLlmReady); }, []);
+
+  const ensureLlm = async (): Promise<boolean> => {
+    if (await hasLlm()) return true;
+    const m = LLM_MODELS[LLM_DEFAULT];
+    const ok = await askChoice(
+      "DOWNLOAD THE ASSISTANT?",
+      `Explanations and summaries are made on the phone by ${m.label} (${m.note}). It is downloaded once — Wi‑Fi strongly recommended — and nothing you read ever leaves the device.`,
+      "💡",
+      [{ key: "yes", icon: "⬇️", label: "Download", sub: m.note, color: MINT }]
+    );
+    if (ok !== "yes") return false;
+    setIsExtracting(true);
+    setTask({ title: "DOWNLOADING THE ASSISTANT", sub: m.note, progress: 0, cancel: cancelLlmDownload });
+    try {
+      await downloadLlm(LLM_DEFAULT, (f) => setTask({ title: "DOWNLOADING THE ASSISTANT", sub: m.note, progress: f, cancel: cancelLlmDownload }));
+      setLlmReady(true);
+      return true;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== "Cancelled") Alert.alert("Assistant", msg);
+      return false;
+    } finally {
+      setTask(null);
+      setIsExtracting(false);
+    }
+  };
+
+  /** the paragraph around block i, or the whole chapter for a summary */
+  const passageFor = (i: number, whole: boolean) => {
+    const segs = segmentsRef.current;
+    if (whole) {
+      const ch = chaptersRef.current.find((c) => i >= c.startIndex && i <= c.endIndex);
+      const a = ch ? ch.startIndex : Math.max(0, i - 40);
+      const b = ch ? ch.endIndex : Math.min(segs.length - 1, i + 40);
+      return segs.slice(a, b + 1).map(mdToPlain).join(" ");
+    }
+    const rows = readRowsRef.current;
+    const r = rows.rows[rows.rowOf[i] ?? 0];
+    return (r ? segs.slice(r.start, r.end) : [segs[i]]).map(mdToPlain).join(" ");
+  };
+
+  const openAsk = useCallback((index: number) => {
+    if (isReadingRef.current) pause();
+    const segs = segmentsRef.current;
+    if (!segs[index]) return;
+    setAi({ index, passage: "", kind: null, answer: "", busy: false, stage: "", lang: DEVICE_LANG.toLowerCase().split(/[-_]/)[0] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const runAsk = async (kind: AskKind) => {
+    const cur = aiRef.current;
+    if (!cur || cur.busy) return;
+    if (!(await hasLlm())) {
+      // the download card lives under the sheet: step aside, come back afterwards
+      setAi(null);
+      if (!(await ensureLlm())) return;
+      setAi(cur);
+      aiRef.current = cur;
+    }
+    const passage = kind === "summary" ? passageFor(cur.index, true) : kind === "meaning" ? mdToPlain(segmentsRef.current[cur.index] ?? "") : passageFor(cur.index, false);
+    const lang = (await detectLanguage(passage.slice(0, 2000))) ?? cur.lang;
+    setAi((a) => (a ? { ...a, kind, passage, lang, answer: "", busy: true, stage: "Loading the model…" } : a));
+    try {
+      await loadLlm(LLM_DEFAULT, (f) => setAi((a) => (a ? { ...a, stage: `Loading the model… ${Math.round(f * 100)}%` } : a)));
+      setAi((a) => (a ? { ...a, stage: "Thinking…" } : a));
+      const answer = await askLlm(kind, passage, translationLangName(lang), (partial) => setAi((a) => (a ? { ...a, answer: partial, stage: "" } : a)));
+      setAi((a) => (a ? { ...a, answer, busy: false, stage: "" } : a));
+    } catch (e: any) {
+      setAi((a) => (a ? { ...a, busy: false, stage: "", answer: a.answer || `Something went wrong: ${String(e?.message ?? e)}` } : a));
+    }
+  };
+
+  const readAnswer = () => {
+    const a = aiRef.current;
+    if (!a?.answer) return;
+    liveQueueRef.current = [a.answer];
+    pumpLive();
+  };
+
+  const closeAsk = async () => {
+    await stopLlm();
+    liveQueueRef.current = [];
+    await safeStop();
+    sessionRef.current += 1;
+    setAi(null);
+  };
+
+  const removeLlm = async () => {
+    const ok = await askChoice("REMOVE THE ASSISTANT?", `${LLM_MODELS[LLM_DEFAULT].label} is deleted from the phone (${LLM_MODELS[LLM_DEFAULT].note.split(" · ")[0]} freed). You can download it again later.`, "🗑️", [
+      { key: "yes", icon: "🗑️", label: "Remove", color: CORAL },
+    ]);
+    if (ok !== "yes") return;
+    await deleteLlm();
+    setLlmReady(false);
   };
 
   // Live reading: the camera activity hands over the text it sees, this queue
@@ -3053,10 +3161,11 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         fontSize={fontSize}
         palette={palette}
         onPress={onPressSegment}
+        onAsk={openAsk}
         word={spokenWord && spokenWord.idx === currentIdx && currentIdx >= item.start && currentIdx < item.end ? spokenWord : null}
       />
     ),
-    [segments, currentIdx, fontSize, palette, onPressSegment, spokenWord]
+    [segments, currentIdx, fontSize, palette, onPressSegment, openAsk, spokenWord]
   );
 
   const busy = isExtracting;
@@ -3474,8 +3583,74 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 <Text style={s.rowSelectChevron}>›</Text>
               </ComicBox>
 
+              <Text style={s.sheetLabel}>Assistant</Text>
+              <ComicBox
+                palette={palette}
+                radius={16}
+                shadow={4}
+                onPress={async () => {
+                  setSettingsOpen(false);
+                  if (llmReady) await removeLlm();
+                  else if (await ensureLlm()) Alert.alert("Assistant", "Ready. Long‑press any sentence while reading to have it explained, simplified or summarised.");
+                }}
+                contentStyle={s.rowSelect}
+              >
+                <Text style={s.rowSelectEmoji}>💡</Text>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <Text style={s.rowSelectText} numberOfLines={1}>{LLM_MODELS[LLM_DEFAULT].label}{llmReady ? " · on the phone" : " · not downloaded"}</Text>
+                  <Text style={s.libMeta} numberOfLines={1}>Long‑press a sentence: explain, simplify, summarise · {llmReady ? "tap to remove" : LLM_MODELS[LLM_DEFAULT].note}</Text>
+                </View>
+                <Text style={s.rowSelectChevron}>›</Text>
+              </ComicBox>
+
               <ComicButton text="DONE" onPress={() => setSettingsOpen(false)} palette={palette} color={MINT} style={{ marginTop: 24 }} />
             </ScrollView>
+          </ComicBox>
+        </View>
+      </Modal>
+
+      {/* SHEET ASSISTANT */}
+      <Modal visible={!!ai} transparent animationType="slide" onRequestClose={closeAsk}>
+        <Pressable style={s.backdrop} onPress={closeAsk} />
+        <View style={[s.sheetWrap, { bottom: sheetBottom, maxHeight: "86%" }]}>
+          <ComicBox palette={palette} radius={26} shadow={6} style={s.sheetBox} contentStyle={s.sheet}>
+            <View style={s.sheetHead}>
+              <Text style={s.sheetEmoji}>💡</Text>
+              <PosterTitle text="ASK ABOUT THIS" palette={palette} size={26} />
+            </View>
+            {ai && !ai.kind ? (
+              <>
+                <Text style={s.voiceHint} numberOfLines={4}>“{mdToPlain(segments[ai.index] ?? "")}”</Text>
+                <View style={[s.chipRow, { marginTop: 12 }]}>
+                  <ComicChip text="Explain" selected onPress={() => runAsk("explain")} palette={palette} color={YELLOW} />
+                  <ComicChip text="What does it mean?" selected onPress={() => runAsk("meaning")} palette={palette} color={SKY} />
+                  <ComicChip text="Simpler words" selected onPress={() => runAsk("simple")} palette={palette} color={MINT} />
+                  <ComicChip text="Summarise the chapter" selected onPress={() => runAsk("summary")} palette={palette} color={GRAPE} />
+                </View>
+                <Text style={[s.voiceHint, { marginTop: 10 }]}>Answers are made on the phone by a small model: helpful, not infallible.</Text>
+              </>
+            ) : ai ? (
+              <>
+                <Text style={s.voiceHint}>
+                  {ai.kind === "summary" ? "Summary of the chapter" : ai.kind === "simple" ? "In simpler words" : ai.kind === "meaning" ? "What it means" : "Explanation"}
+                  {ai.stage ? ` · ${ai.stage}` : ""}
+                </Text>
+                <ScrollView style={{ marginTop: 8, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
+                  <Text style={[s.chapterText, { fontSize: 17, lineHeight: 26 }]}>{ai.answer || (ai.busy ? "…" : "")}</Text>
+                </ScrollView>
+                <View style={[s.chipRow, { marginTop: 12 }]}>
+                  {ai.busy ? (
+                    <ComicChip text="Stop" selected onPress={() => stopLlm()} palette={palette} color={CORAL} />
+                  ) : (
+                    <>
+                      <ComicChip text="🔊 Read it to me" selected onPress={readAnswer} palette={palette} color={MINT} />
+                      <ComicChip text="Another question" selected onPress={() => setAi((a) => (a ? { ...a, kind: null, answer: "" } : a))} palette={palette} color={YELLOW} />
+                    </>
+                  )}
+                </View>
+              </>
+            ) : null}
+            <ComicButton text="CLOSE" onPress={closeAsk} palette={palette} color={CORAL} style={{ marginTop: 18 }} />
           </ComicBox>
         </View>
       </Modal>

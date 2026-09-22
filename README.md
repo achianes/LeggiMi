@@ -75,6 +75,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Word by word**: inside the highlighted sentence the word being spoken is underlined (system voices report it; natural voices estimate it from the playback position).
 - **Keeps reading in the background**: with the screen off, in another app, in the car. A media card with Previous · Play/Pause · Next · Stop sits in the notification shade and on the lock screen; headset buttons work; a phone call pauses the reading and it resumes when the call ends; unplugging the headphones pauses it.
 - **Sleep timer**: 15, 30, 45 or 60 minutes, or “end of chapter”. The countdown shows in the document card; Play resumes from the very sentence where it stopped.
+- **Ask about this**: long‑press any sentence while reading and a small language model **on the phone** (Gemma 3 1B through llama.cpp, downloaded once, 806 MB) explains the passage, tells what a sentence means, rewrites it in simpler words or summarises the chapter — in the language of the text, and it can read the answer aloud. Nothing you read leaves the device. Turn it on from Settings › Assistant.
 - **Translate**: from the Library, 📤 › **Translate…** turns a whole document into another language on the phone (ML Kit; a ~30 MB pack per language is downloaded once). Headings, list items and paragraphs keep their shape, so the translation opens with the same chapters as the original; it is added to the Library and can be saved as PDF or TXT in Download/LeggiMi and then sent to your cloud. Eighteen languages, source detected automatically.
 - **Audiobook**: from the Library, 📤 › **Audiobook (.m4a)** turns the whole document into one AAC file spoken by the natural voice, saved in Download/LeggiMi and then, if you like, sent to the cloud or shared.
 - **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2× (natural voices follow it too).
@@ -291,6 +292,7 @@ src/speech/piper.ts                   # natural voices: catalogue, download/unpa
 src/docs/epub.ts                      # EPUB: spine, table of contents, XHTML -> Markdown
 src/docs/webpage.ts                   # shared links: in-WebView article extraction
 src/translate/translate.ts            # document translation keeping the Markdown shape
+src/ai/llm.ts                         # on-phone assistant: model download, prompts, streaming answers (llama.rn)
 src/playback/playback.ts              # media card / background reading bridge
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
@@ -317,7 +319,7 @@ docs/icon/generate_icons.py           # renders the icon to the legacy PNGs
 
 ## Tech stack
 
-React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with [Piper](https://github.com/rhasspy/piper) voices · Android MediaSession / MediaCodec · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner, Translation, Language ID) · whisper.cpp via whisper.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
+React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with [Piper](https://github.com/rhasspy/piper) voices · Android MediaSession / MediaCodec · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner, Translation, Language ID) · whisper.cpp via whisper.rn · llama.cpp via llama.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
 
 Fonts: [Luckiest Guy](https://fonts.google.com/specimen/Luckiest+Guy) and [Comic Neue](https://fonts.google.com/specimen/Comic+Neue) (SIL Open Font License).
 
@@ -340,4 +342,5 @@ If this saved you an argument about who forgot the water bill:
 - Natural voices are Italian and English for now; more Piper languages can be added to the catalogue in `src/speech/piper.ts`. A natural voice takes a moment to load the first time it speaks after the app starts.
 - The APK ships 64-bit libraries only (arm64-v8a and x86_64).
 - Audiobooks are one .m4a per document, without chapter markers.
+- The assistant is a 1‑billion‑parameter model: good at explaining and summarising plainly, not a reference. On a mid‑range phone it takes 10–40 s to answer about a chapter; the first answer after opening the app also loads the model (a few seconds).
 - Google Drive needs the one-time Google Cloud registration described above. Until then it shows an explanatory message.

@@ -17,6 +17,7 @@
     "@react-native/new-app-screen": "0.83.1",
     "fast-xml-parser": "^5.3.5",
     "jszip": "^3.10.1",
+    "llama.rn": "^0.12.9",
     "pdfjs-dist": "^5.4.624",
     "react": "19.2.0",
     "react-native": "0.83.1",
