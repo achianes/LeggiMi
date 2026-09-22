@@ -83,6 +83,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Share** a file, several pictures, a link, or just selected text from any app.
 - **Print** from apps without a Share button: pick the virtual printer **“LeggiMi (read aloud)”**.
 - **Scan** paper pages with the camera (📷).
+- **Read what I see** (👁️): point the camera at a sign, a menu, a letter, a screen. The text is recognised on the phone as you hold it and read aloud as soon as it settles (or on **Read this**); what was read can be kept in the Library. Made for people who see little.
 - **Record** elsewhere and share the audio file: LeggiMi transcribes it.
 
 ### Scanner (CamScanner-style)
@@ -301,6 +302,7 @@ android/app/src/main/java/com/leggimimobile/
   playback/LeggiMiPlaybackService.kt  # foreground media service: notification, media session, focus, wake lock
   piper/LeggiMiPiperModule.kt         # sherpa-onnx Piper voices: unpack, load, speak, WAV synthesis
   piper/AacEncoder.kt                 # WAV -> .m4a with MediaCodec
+  live/LiveReadActivity.kt            # camera preview + live text recognition (CameraX, ML Kit)
 android/app/libs/sherpa-onnx-*.aar    # sherpa-onnx runtime (onnxruntime + JNI)
 android/app/src/main/assets/pdfjs/    # offline pdf.js
 android/app/src/main/assets/fonts/    # Luckiest Guy + Comic Neue

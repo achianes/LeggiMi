@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- live reading: the camera preview with on-device text recognition -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <!-- only Android 9 and older need it to save exports in the public Download folder -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
@@ -47,6 +50,12 @@
 			android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
 			android:value="com.reactnative.googlecast.GoogleCastOptionsProvider" />
       </activity>
+
+      <activity
+        android:name=".live.LiveReadActivity"
+        android:exported="false"
+        android:screenOrientation="portrait"
+        android:theme="@style/Theme.AppCompat.NoActionBar" />
 
       <!-- Reading aloud in the background: media controls, headset buttons, audio focus -->
       <service

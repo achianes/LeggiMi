@@ -128,6 +128,13 @@ dependencies {
     // commons-compress unpacks the .tar.bz2 voice packages
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
     implementation("org.apache.commons:commons-compress:1.28.0")
+    // live reading: CameraX preview + frames to the ML Kit text recogniser (already a dependency)
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

@@ -13,6 +13,7 @@ import {
   useColorScheme,
   NativeModules,
   AppState,
+  DeviceEventEmitter,
   Linking,
   PermissionsAndroid,
   Platform,
@@ -1906,6 +1907,59 @@ function AppInner() {
     try { await Tts.speak(phrase); } catch {}
   };
 
+  // Live reading: the camera activity hands over the text it sees, this queue
+  // speaks it with the chosen voice, one snippet after the other
+  const liveQueueRef = useRef<string[]>([]);
+  const liveSpeakingRef = useRef(false);
+  const liveSessionRef = useRef(0);
+  const pumpLive = async () => {
+    if (liveSpeakingRef.current) return;
+    liveSpeakingRef.current = true;
+    try {
+      while (liveQueueRef.current.length) {
+        const text = liveQueueRef.current.shift()!;
+        const token = (sessionRef.current += 1);
+        liveSessionRef.current = token;
+        await safeStop();
+        const ok = await speakOne(text, -1, token);
+        if (ok === "skip" || !ok) continue;
+        await waitTtsDone(token, 60000);
+      }
+    } finally {
+      liveSpeakingRef.current = false;
+    }
+  };
+  const liveRead = async () => {
+    const N: any = (NativeModules as any).LeggiMiLive;
+    if (!N) { Alert.alert("Live reading", "Not available in this build."); return; }
+    await hardStop();
+    const piperKey = isPiperVoice(voiceIdRef.current) ? piperKeyOf(voiceIdRef.current) : null;
+    if (piperKey) { try { await loadPiperVoice(piperKey); } catch {} }
+    else { await ensureTtsReady(4000); try { await Tts.setDefaultRate(rateRef.current, true); } catch {} }
+    liveQueueRef.current = [];
+    const sub = DeviceEventEmitter.addListener("live-text", (t: string) => {
+      const clean = String(t || "").replace(/\s*\n\s*/g, " ").trim();
+      if (!clean) return;
+      liveQueueRef.current.push(clean);
+      pumpLive();
+    });
+    let all = "";
+    try { all = String(await N.start(true)); } catch (e: any) { Alert.alert("Live reading", String(e?.message ?? e)); }
+    sub.remove();
+    liveQueueRef.current = [];
+    await safeStop();
+    sessionRef.current += 1;
+    const text = all.trim();
+    if (text.length < 20) return;
+    const k = await askChoice(
+      "KEEP WHAT YOU READ?",
+      `${text.split(/\s+/).length} words were read from the camera. Keep them as a document in the Library?`,
+      "📸",
+      [{ key: "keep", icon: "🕘", label: "Keep it", sub: "Read it again later, export it, send it", color: MINT }]
+    );
+    if (k === "keep") await openSharedText(`Camera ${new Date().toLocaleString()}`, text, false);
+  };
+
   // neural voices: download once (with progress), then select; ✕ removes the files
   const downloadVoice = async (k: PiperVoiceKey) => {
     const v = PIPER_VOICES[k];
@@ -3134,6 +3188,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               </View>
               <ComicButton text="OPEN A DOCUMENT" icon="📂" onPress={pickFile} palette={palette} color={YELLOW} style={{ marginTop: 18 }} />
               <ComicButton text="SCAN PAGES" icon="📷" onPress={() => setScanOpen({ docId: null, start: "camera" })} palette={palette} color={BUBBLEGUM} style={{ marginTop: 12 }} />
+              <ComicButton text="READ WHAT I SEE" icon="👁️" onPress={liveRead} palette={palette} color={AQUA} style={{ marginTop: 12 }} />
               {library.length > 0 ? (
                 <ComicButton text={`LIBRARY · ${library.length}`} icon="🕘" onPress={() => setLibraryOpen(true)} palette={palette} color={TANGERINE} compact style={{ marginTop: 12 }} />
               ) : null}
