@@ -1226,18 +1226,23 @@ function AppInner() {
     if (!acc) return;
     syncBusyRef.current = true;
     try {
-      const merged = await pushProgress(acc, await localProgressSnapshot(), deviceName);
-      console.log("[sync] pushed", Object.keys(merged).length, "documents");
-    } catch (e: any) { console.log("[sync] push failed", String(e?.message ?? e)); }
+      await pushProgress(acc, await localProgressSnapshot(), deviceName);
+    } catch {}
     finally { syncBusyRef.current = false; }
   };
+  const lastPushRef = useRef(0);
   const pushSyncSoon = (ms = 20000) => {
     clearTimeout(syncTimerRef.current);
-    syncTimerRef.current = setTimeout(pushSyncNow, ms);
+    // while reading, positions change every sentence: still push at least once a minute
+    const wait = Date.now() - lastPushRef.current > 60000 ? Math.min(ms, 2000) : ms;
+    syncTimerRef.current = setTimeout(() => { lastPushRef.current = Date.now(); pushSyncNow(); }, wait);
   };
   useEffect(() => {
     onProgressSaved = () => pushSyncSoon();
-    const sub = AppState.addEventListener("change", (st) => { if (st !== "active") pushSyncSoon(800); });
+    // going to the background: push right away (JS timers are paused while the app is not in front)
+    const sub = AppState.addEventListener("change", (st) => {
+      if (st !== "active") { clearTimeout(syncTimerRef.current); lastPushRef.current = Date.now(); pushSyncNow(); }
+    });
     return () => { onProgressSaved = null; sub.remove(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1247,9 +1252,8 @@ function AppInner() {
     const acc = await syncAccountId();
     if (!acc) return;
     let remote: RemoteProgress;
-    try { remote = await pullProgress(acc); } catch (e: any) { console.log("[sync] pull failed", String(e?.message ?? e)); return; }
+    try { remote = await pullProgress(acc); } catch { return; }
     const r = remote[fid];
-    console.log("[sync] pulled", Object.keys(remote).length, "documents; this one:", r ? `${r.index + 1}/${r.total} on ${r.device}` : "none");
     if (!r || fileIdRef.current !== fid) return;
     const localAt = await loadProgressAt(fid);
     const here = currentIdxRef.current;
@@ -2025,6 +2029,7 @@ function AppInner() {
     persistLibrary(next).catch(() => {});
     if (entry.textPath) RNFS.unlink(entry.textPath).catch(() => {});
     AsyncStorage.removeItem(`progress:${entry.id}`).catch(() => {});
+    AsyncStorage.removeItem(`progressAt:${entry.id}`).catch(() => {});
     if (entry.scanId) deleteScan(entry.scanId).catch(() => {});
   };
 
