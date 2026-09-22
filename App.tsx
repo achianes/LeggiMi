@@ -1740,7 +1740,6 @@ function AppInner() {
   const speakFrom = async (startIndex: number) => {
     const segs = segmentsRef.current;
     if (!segs.length) return;
-    console.log("SPEAKFROM", startIndex, String(new Error().stack).split("\n").slice(1, 5).join(" | "));
 
     stopRef.current = false;
     ttsErrorShownRef.current = false;
