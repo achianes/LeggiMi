@@ -1,0 +1,288 @@
+package com.leggimimobile.playback
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
+import android.os.IBinder
+import android.os.PowerManager
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.media.session.MediaButtonReceiver
+import com.leggimimobile.MainActivity
+import com.leggimimobile.R
+
+/**
+ * Keeps the reading alive when the screen is off or another app is in front:
+ * a media-style notification with controls (also on the lock screen), a media
+ * session for headset buttons, audio focus (pause when a call comes in) and a
+ * wake lock. The reading itself stays in JS; this service only reports what the
+ * user asked for (play, pause, next, previous, stop) through [listener].
+ */
+class LeggiMiPlaybackService : Service() {
+
+    companion object {
+        private const val TAG = "LeggiMiPlayback"
+        const val CHANNEL_ID = "leggimi_playback"
+        const val NOTIF_ID = 4242
+        const val ACTION_PLAY = "com.leggimimobile.playback.PLAY"
+        const val ACTION_PAUSE = "com.leggimimobile.playback.PAUSE"
+        const val ACTION_NEXT = "com.leggimimobile.playback.NEXT"
+        const val ACTION_PREV = "com.leggimimobile.playback.PREV"
+        const val ACTION_STOP = "com.leggimimobile.playback.STOP"
+        const val ACTION_UPDATE = "com.leggimimobile.playback.UPDATE"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_SUBTITLE = "subtitle"
+        const val EXTRA_PLAYING = "playing"
+
+        /** set by the React module: receives "play" | "pause" | "next" | "prev" | "stop" */
+        @Volatile var listener: ((String) -> Unit)? = null
+        @Volatile var instance: LeggiMiPlaybackService? = null
+    }
+
+    private lateinit var session: MediaSessionCompat
+    private lateinit var audioManager: AudioManager
+    private var focusRequest: AudioFocusRequest? = null
+    private var hasFocus = false
+    private var resumeOnFocusGain = false
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var title = "LeggiMi"
+    private var subtitle = ""
+    private var playing = false
+    private var noisyRegistered = false
+
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            // headphones unplugged: nobody wants the book shouted from the speaker
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playing) listener?.invoke("pause")
+        }
+    }
+
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                resumeOnFocusGain = false
+                if (playing) listener?.invoke("pause")
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // a call, a navigation prompt: pause and come back afterwards
+                if (playing) { resumeOnFocusGain = true; listener?.invoke("pause") }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (resumeOnFocusGain) { resumeOnFocusGain = false; listener?.invoke("play") }
+            }
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        createChannel()
+        session = MediaSessionCompat(this, "LeggiMi").apply {
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() { listener?.invoke("play") }
+                override fun onPause() { listener?.invoke("pause") }
+                override fun onSkipToNext() { listener?.invoke("next") }
+                override fun onSkipToPrevious() { listener?.invoke("prev") }
+                override fun onStop() { listener?.invoke("stop") }
+            })
+            isActive = true
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        MediaButtonReceiver.handleIntent(session, intent)
+        when (intent?.action) {
+            ACTION_PLAY -> listener?.invoke("play")
+            ACTION_PAUSE -> listener?.invoke("pause")
+            ACTION_NEXT -> listener?.invoke("next")
+            ACTION_PREV -> listener?.invoke("prev")
+            ACTION_STOP -> listener?.invoke("stop")
+            ACTION_UPDATE -> {
+                applyState(
+                    intent.getStringExtra(EXTRA_TITLE) ?: title,
+                    intent.getStringExtra(EXTRA_SUBTITLE) ?: subtitle,
+                    intent.getBooleanExtra(EXTRA_PLAYING, playing)
+                )
+                return START_NOT_STICKY
+            }
+        }
+        // a button intent while foreground was requested: show the card at once (5 s rule)
+        publish()
+        return START_NOT_STICKY
+    }
+
+    fun applyState(newTitle: String, newSubtitle: String, newPlaying: Boolean) {
+        title = newTitle
+        subtitle = newSubtitle
+        playing = newPlaying
+        if (playing) { requestFocus(); acquireWake(); registerNoisy() } else { releaseWake() }
+        publish()
+    }
+
+    private fun publish() {
+        try {
+            session.setMetadata(
+                MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "LeggiMi")
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, -1L)
+                    .build()
+            )
+            val actions = PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP
+            session.setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(actions)
+                    .setState(
+                        if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
+                        PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f
+                    )
+                    .build()
+            )
+            val notification = buildNotification()
+            if (playing) {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                } else {
+                    startForeground(NOTIF_ID, notification)
+                }
+            } else {
+                // paused: keep the card (resume from the lock screen), but let it be swiped away
+                if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_DETACH) else @Suppress("DEPRECATION") stopForeground(false)
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIF_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "publish failed", e)
+        }
+    }
+
+    private fun pending(action: String): PendingIntent {
+        val i = Intent(this, LeggiMiPlaybackService::class.java).setAction(action)
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        return if (Build.VERSION.SDK_INT >= 26) PendingIntent.getForegroundService(this, action.hashCode(), i, flags)
+        else PendingIntent.getService(this, action.hashCode(), i, flags)
+    }
+
+    private fun buildNotification(): Notification {
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val b = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_leggimi)
+            .setContentTitle(title)
+            .setContentText(subtitle)
+            .setContentIntent(open)
+            .setDeleteIntent(pending(ACTION_STOP))
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setOngoing(playing)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .addAction(android.R.drawable.ic_media_previous, "Previous", pending(ACTION_PREV))
+        if (playing) b.addAction(android.R.drawable.ic_media_pause, "Pause", pending(ACTION_PAUSE))
+        else b.addAction(android.R.drawable.ic_media_play, "Play", pending(ACTION_PLAY))
+        b.addAction(android.R.drawable.ic_media_next, "Next", pending(ACTION_NEXT))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pending(ACTION_STOP))
+            .setStyle(
+                androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(session.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
+        return b.build()
+    }
+
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT < 26) return
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
+        val ch = NotificationChannel(CHANNEL_ID, "Reading aloud", NotificationManager.IMPORTANCE_LOW)
+        ch.description = "Controls of the document being read"
+        ch.setShowBadge(false)
+        nm.createNotificationChannel(ch)
+    }
+
+    private fun requestFocus() {
+        if (hasFocus) return
+        val res = if (Build.VERSION.SDK_INT >= 26) {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(focusListener)
+                .setWillPauseWhenDucked(false)
+                .build()
+            focusRequest = req
+            audioManager.requestAudioFocus(req)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+        hasFocus = res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun abandonFocus() {
+        if (!hasFocus) return
+        try {
+            if (Build.VERSION.SDK_INT >= 26) focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+            else @Suppress("DEPRECATION") audioManager.abandonAudioFocus(focusListener)
+        } catch (_: Exception) {}
+        hasFocus = false
+    }
+
+    private fun acquireWake() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LeggiMi:reading").also {
+                it.setReferenceCounted(false)
+                it.acquire(6 * 60 * 60 * 1000L) // six hours at most, a safety net
+            }
+        } catch (e: Exception) { Log.w(TAG, "wake lock", e) }
+    }
+
+    private fun releaseWake() {
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
+    }
+
+    private fun registerNoisy() {
+        if (noisyRegistered) return
+        try {
+            registerReceiver(noisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+            noisyRegistered = true
+        } catch (_: Exception) {}
+    }
+
+    override fun onDestroy() {
+        instance = null
+        releaseWake()
+        abandonFocus()
+        if (noisyRegistered) try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}
+        try { session.isActive = false; session.release() } catch (_: Exception) {}
+        try { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID) } catch (_: Exception) {}
+        super.onDestroy()
+    }
+}

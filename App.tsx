@@ -37,6 +37,11 @@ import {
   ComicBox, ComicButton, ComicIconButton, ComicChip, PosterTitle,
 } from "./src/comic";
 import ScanStudio from "./src/scan/ScanStudio";
+import { playback } from "./src/playback/playback";
+import {
+  PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice,
+  downloadPiperVoice, cancelPiperDownload, deletePiperVoice, loadPiperVoice, piper,
+} from "./src/speech/piper";
 import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
 import { ScanDoc, deleteScan, scanNative, safeFileName, loadScan, needsOcr } from "./src/scan/store";
 import {
@@ -890,6 +895,21 @@ function mdToPlain(s: string) {
 
 // =====================================================================
 
+/** the word the voice is on: `text` is what was sent to the engine, start/end index it */
+type SpokenWord = { text: string; start: number; end: number };
+const hasMdTokens = (t: string) => new RegExp(MD_INLINE_RE.source).test(t);
+/** a sentence with the spoken word marked, when the engine's text is the shown text */
+function renderWithWord(t: string, word: SpokenWord | null | undefined, base: TextStyle, palette: Palette, strong: boolean) {
+  if (word && word.text === t && !hasMdTokens(t) && word.end > word.start && word.end <= t.length) {
+    return [
+      t.slice(0, word.start),
+      <Text key="w" style={{ fontFamily: FONT_BOLD, textDecorationLine: "underline" }}>{t.slice(word.start, word.end)}</Text>,
+      t.slice(word.end),
+    ];
+  }
+  return renderInline(t, base, palette, strong);
+}
+
 type RowProps = {
   text: string;
   index: number;
@@ -897,6 +917,7 @@ type RowProps = {
   fontSize: number;
   palette: Palette;
   onPress: (i: number) => void;
+  word?: SpokenWord | null;
 };
 /** Inline Markdown (bold, italic, code, strike, links) as nested Text spans. */
 function renderInline(text: string, base: TextStyle, palette: Palette, strong: boolean): React.ReactNode[] {
@@ -938,10 +959,10 @@ function renderInline(text: string, base: TextStyle, palette: Palette, strong: b
   return nodes;
 }
 
-type MdBlockProps = { text: string; fontSize: number; color: string; palette: Palette; strong: boolean };
+type MdBlockProps = { text: string; fontSize: number; color: string; palette: Palette; strong: boolean; word?: SpokenWord | null };
 
 /** One reading block rendered as light Markdown. */
-function MdBlock({ text, fontSize, color, palette, strong }: MdBlockProps) {
+function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps) {
   const lineHeight = Math.round(fontSize * 1.5);
   const body: TextStyle = { color, fontSize, lineHeight, fontFamily: strong ? FONT_BOLD : FONT_BODY };
   const lines = text.split("\n").filter((l) => l.trim().length > 0);
@@ -993,7 +1014,7 @@ function MdBlock({ text, fontSize, color, palette, strong }: MdBlockProps) {
           );
         }
         return (
-          <Text key={i} style={body}>{renderInline(p.text, body, palette, strong)}</Text>
+          <Text key={i} style={body}>{renderWithWord(p.text, word, body, palette, strong)}</Text>
         );
       })}
     </View>
@@ -1001,7 +1022,7 @@ function MdBlock({ text, fontSize, color, palette, strong }: MdBlockProps) {
 }
 
 const SegmentRow = React.memo(function SegmentRow({
-  text, index, active, fontSize, palette, onPress,
+  text, index, active, fontSize, palette, onPress, word,
 }: RowProps) {
   if (active) {
     // the block being read becomes a yellow sticker
@@ -1009,7 +1030,7 @@ const SegmentRow = React.memo(function SegmentRow({
       <Pressable onPress={() => onPress(index)} style={rowStyles.activeWrap}>
         <View pointerEvents="none" style={[rowStyles.activeShadow, { backgroundColor: palette.shadow }]} />
         <View style={[rowStyles.activeCard, { backgroundColor: palette.hlBg, borderColor: palette.ink }]}>
-          <MdBlock text={text} fontSize={fontSize} color={palette.hlText} palette={palette} strong />
+          <MdBlock text={text} fontSize={fontSize} color={palette.hlText} palette={palette} strong word={word} />
         </View>
       </Pressable>
     );
@@ -1031,17 +1052,19 @@ type ParaRowProps = {
   fontSize: number;
   palette: Palette;
   onPress: (i: number) => void;
+  /** the word being spoken, when the active sentence is in this row */
+  word?: SpokenWord | null;
 };
 
 /** A paragraph: its sentences flow as one text, the one being read is highlighted in place. */
 const ParagraphRow = React.memo(function ParagraphRow({
-  all, start, end, cont, activeIdx, fontSize, palette, onPress,
+  all, start, end, cont, activeIdx, fontSize, palette, onPress, word,
 }: ParaRowProps) {
   const segs = all.slice(start, end);
   if (segs.length === 1 && !cont) {
     // a paragraph of one block (or a heading, a list…): being read, it becomes the yellow sticker
     if (activeIdx === start) {
-      return <SegmentRow text={segs[0]} index={start} active fontSize={fontSize} palette={palette} onPress={onPress} />;
+      return <SegmentRow text={segs[0]} index={start} active fontSize={fontSize} palette={palette} onPress={onPress} word={word} />;
     }
     return (
       <Pressable onPress={() => onPress(start)} style={rowStyles.para}>
@@ -1063,7 +1086,7 @@ const ParagraphRow = React.memo(function ParagraphRow({
               onPress={() => onPress(i)}
               style={active ? { backgroundColor: palette.hlBg, color: palette.hlText } : undefined}
             >
-              {renderInline(t, body, palette, active)}
+              {active ? renderWithWord(t, word, body, palette, active) : renderInline(t, body, palette, false)}
               {j < segs.length - 1 ? " " : ""}
             </Text>
           );
@@ -1149,6 +1172,14 @@ function AppInner() {
   // cloud accounts sheet; with a file it asks where to upload it
   const [cloudOpen, setCloudOpen] = useState<{ file: UploadFile | null; onUploaded?: () => void } | null>(null);
   const [speechModelLabel, setSpeechModelLabel] = useState("");
+  // neural (Piper) voices downloaded on this phone
+  const [piperReady, setPiperReady] = useState<Partial<Record<PiperVoiceKey, boolean>>>({});
+  const refreshPiperReady = useCallback(async () => {
+    const out: Partial<Record<PiperVoiceKey, boolean>> = {};
+    for (const k of PIPER_KEYS) out[k] = await hasPiperVoice(k);
+    setPiperReady(out);
+  }, []);
+  useEffect(() => { refreshPiperReady(); }, [refreshPiperReady]);
 
   // long local jobs (model download, transcription) shown in the loading card
   const [task, setTask] = useState<{ title: string; sub?: string; progress?: number; cancel?: () => void } | null>(null);
@@ -1178,6 +1209,86 @@ function AppInner() {
   useEffect(() => { rateRef.current = rate; }, [rate]);
   const voiceIdRef = useRef<string | null>(null);
   useEffect(() => { voiceIdRef.current = voiceId; }, [voiceId]);
+  const currentIdxRef = useRef(0);
+  useEffect(() => { currentIdxRef.current = currentIdx; }, [currentIdx]);
+  const chaptersRef = useRef<Chapter[]>([]);
+  useEffect(() => { chaptersRef.current = chapters; }, [chapters]);
+
+  // Sleep timer: the reading stops by itself after N minutes or at the end of the chapter
+  type SleepMode = "off" | "15" | "30" | "45" | "60" | "chapter";
+  const [sleepMode, setSleepMode] = useState<SleepMode>("off");
+  const sleepRef = useRef<{ mode: SleepMode; until: number; chapterEnd: number }>({ mode: "off", until: 0, chapterEnd: -1 });
+  const [sleepLeft, setSleepLeft] = useState<string | null>(null);
+  const clearSleep = () => {
+    sleepRef.current = { mode: "off", until: 0, chapterEnd: -1 };
+    setSleepMode("off");
+    setSleepLeft(null);
+  };
+  const setSleep = (mode: SleepMode) => {
+    if (mode === "off") { clearSleep(); return; }
+    setSleepMode(mode);
+    if (mode === "chapter") {
+      const i = currentIdxRef.current;
+      const ch = chaptersRef.current.find((c) => i >= c.startIndex && i <= c.endIndex);
+      sleepRef.current = { mode, until: 0, chapterEnd: ch ? ch.endIndex : segmentsRef.current.length - 1 };
+      setSleepLeft("end of chapter");
+      return;
+    }
+    const min = parseInt(mode, 10);
+    sleepRef.current = { mode, until: Date.now() + min * 60000, chapterEnd: -1 };
+    setSleepLeft(`${min} min`);
+  };
+  useEffect(() => {
+    if (sleepMode === "off" || sleepMode === "chapter") return;
+    const t = setInterval(() => {
+      const left = Math.max(0, sleepRef.current.until - Date.now());
+      setSleepLeft(`${Math.ceil(left / 60000)} min`);
+    }, 10000);
+    return () => clearInterval(t);
+  }, [sleepMode]);
+
+  // The word being spoken: the engine reports character ranges of the text it
+  // was given (tts-progress); spokenRef remembers which sentence that text is.
+  const spokenRef = useRef<{ idx: number; text: string } | null>(null);
+  const [spokenWord, setSpokenWord] = useState<{ idx: number; text: string; start: number; end: number } | null>(null);
+  useEffect(() => {
+    const sub: any = Tts.addEventListener("tts-progress" as any, (e: any) => {
+      const cur = spokenRef.current;
+      if (!cur) return;
+      const start = Number(e?.location ?? -1);
+      const len = Number(e?.length ?? 0);
+      if (start < 0 || len <= 0) return;
+      setSpokenWord({ idx: cur.idx, text: cur.text, start, end: start + len });
+    });
+    const unsubPiper = piper.onProgress((_id, start, len) => {
+      const cur = spokenRef.current;
+      if (!cur || start < 0 || len <= 0) return;
+      setSpokenWord({ idx: cur.idx, text: cur.text, start, end: start + len });
+    });
+    return () => { try { sub?.remove?.(); } catch {} unsubPiper(); };
+  }, []);
+  const clearSpoken = () => { spokenRef.current = null; setSpokenWord(null); };
+
+  // Background reading: the media card (lock screen, headset, other apps)
+  const lastNotifRef = useRef("");
+  const notifAskedRef = useRef(false);
+  const notifyPlayback = (playing: boolean, idx = currentIdxRef.current) => {
+    const segs = segmentsRef.current;
+    const n = segs.length;
+    if (!n) return;
+    const name = currentMetaRef.current?.name ?? "LeggiMi";
+    const ch = chaptersRef.current.find((c) => idx >= c.startIndex && idx <= c.endIndex);
+    const pct = Math.round(((idx + 1) / n) * 100);
+    const sub = `${ch ? `${ch.title} · ` : ""}${pct}% · block ${idx + 1}/${n}`;
+    const key = `${playing}|${name}|${sub}`;
+    if (key === lastNotifRef.current) return;
+    lastNotifRef.current = key;
+    playback.update(name, sub, playing);
+  };
+  // the card goes away with the document
+  useEffect(() => {
+    if (!segments.length) { lastNotifRef.current = ""; playback.stop(); }
+  }, [segments.length]);
 
   const listRef = useRef<FlatList<ReadRow> | null>(null);
   const processingShareRef = useRef(false);
@@ -1202,6 +1313,10 @@ function AppInner() {
 
   const currentVoiceLabel = useMemo(() => {
     if (!voiceId) return "System default";
+    if (isPiperVoice(voiceId)) {
+      const k = piperKeyOf(voiceId);
+      return k ? `${PIPER_VOICES[k].label} · natural voice` : "Natural voice";
+    }
     const i = voices.findIndex((v) => v.id === voiceId);
     return i >= 0 ? voiceLabel(voices[i], i) : "Selected voice";
   }, [voiceId, voices]);
@@ -1296,7 +1411,13 @@ function AppInner() {
           AsyncStorage.getItem(SETTINGS_FONT_KEY),
           AsyncStorage.getItem(SETTINGS_VOICE_KEY),
         ]);
-        if (savedVoice) setVoiceId(savedVoice);
+        if (savedVoice) {
+          // a neural voice that was deleted falls back to the system default
+          if (isPiperVoice(savedVoice)) {
+            const k = piperKeyOf(savedVoice);
+            if (k && (await hasPiperVoice(k))) setVoiceId(savedVoice);
+          } else setVoiceId(savedVoice);
+        }
         if (savedRate) { const v = Number(savedRate); if (!Number.isNaN(v)) setRate(v); }
         if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "sepia") {
           setThemeName(savedTheme);
@@ -1411,7 +1532,7 @@ function AppInner() {
 
   // applica la voce scelta e salvala
   useEffect(() => {
-    if (ttsReady && voiceId) Tts.setDefaultVoice(voiceId).catch(() => {});
+    if (ttsReady && voiceId && !isPiperVoice(voiceId)) Tts.setDefaultVoice(voiceId).catch(() => {});
   }, [ttsReady, voiceId]);
   useEffect(() => {
     if (!settingsLoaded) return;
@@ -1420,7 +1541,7 @@ function AppInner() {
   }, [voiceId, settingsLoaded]);
 
   // ====== CONTROLLI TTS ======
-  const safeStop = async () => { try { await Tts.stop(); } catch {} };
+  const safeStop = async () => { try { await Tts.stop(); } catch {} await piper.stop(); };
 
   // getInitStatus() si risolve quando il motore e' pronto. All'avvio "a freddo"
   // (tipico dell'apertura via Condividi) puo' non esserlo ancora: attendiamo.
@@ -1439,28 +1560,38 @@ function AppInner() {
     setIsPaused(false);
     await safeStop();
     setIsReading(false);
+    clearSpoken();
+    notifyPlayback(false);
   };
 
   const pause = async () => {
-    if (!isReading) return;
+    if (!isReadingRef.current) return;
     stopRef.current = true;
     sessionRef.current += 1;
     await safeStop();
     setIsReading(false);
     setIsPaused(true);
+    clearSpoken();
+    notifyPlayback(false);
   };
 
-  const speakOne = async (text: string) => {
+  const speakOne = async (text: string, idx: number, session: number): Promise<boolean | "skip"> => {
     const plain = mdToPlain(text);
     const a = sanitizeForTts(plain);
-    if (!a) return true;
+    if (!a) return "skip";
+    if (isPiperVoice(voiceIdRef.current)) {
+      // neural voice: completion arrives as a piper event (see waitTtsDone)
+      spokenRef.current = { idx, text: a };
+      try { await piper.speak(`${session}:${idx}`, a, rateRef.current); return true; } catch { return false; }
+    }
     try {
+      spokenRef.current = { idx, text: a };
       await Tts.speak(a);
       return true;
     } catch {
       const b = sanitizeForTtsStrong(plain);
       if (!b) return true;
-      try { await Tts.speak(b); return true; } catch { return false; }
+      try { spokenRef.current = { idx, text: b }; await Tts.speak(b); return true; } catch { return false; }
     }
   };
 
@@ -1470,6 +1601,7 @@ function AppInner() {
       let subFinish: any = null;
       let subCancel: any = null;
       let subError: any = null;
+      let subPiper: any = null;
 
       const cleanupAndResolve = () => {
         if (done) return;
@@ -1479,6 +1611,7 @@ function AppInner() {
         try { subFinish?.remove?.(); } catch {}
         try { subCancel?.remove?.(); } catch {}
         try { subError?.remove?.(); } catch {}
+        try { subPiper?.remove?.(); } catch {}
         resolve();
       };
 
@@ -1490,6 +1623,14 @@ function AppInner() {
       subFinish = Tts.addEventListener("tts-finish", cleanupAndResolve);
       subCancel = Tts.addEventListener("tts-cancel", cleanupAndResolve);
       subError = Tts.addEventListener("tts-error", cleanupAndResolve);
+      const unsubPiper = piper.onDone((kind, _id, message) => {
+        if (kind === "error" && !ttsErrorShownRef.current) {
+          ttsErrorShownRef.current = true;
+          Alert.alert("Natural voice", message || "This sentence could not be synthesised.");
+        }
+        cleanupAndResolve();
+      });
+      subPiper = { remove: unsubPiper };
     });
   };
 
@@ -1501,55 +1642,93 @@ function AppInner() {
     ttsErrorShownRef.current = false;
     const sessionToken = (sessionRef.current += 1);
 
-    const ready = await ensureTtsReady();
-    if (sessionRef.current !== sessionToken) return;
-    if (!ready) {
-      if (!ttsErrorShownRef.current) {
-        ttsErrorShownRef.current = true;
-        Alert.alert(
-          "Text to speech",
-          "The phone's speech engine is not ready yet. Wait a few seconds and try again; if it persists, open Android Settings › Language & input › Text-to-speech and check that a voice is installed."
-        );
+    const piperKey = isPiperVoice(voiceIdRef.current) ? piperKeyOf(voiceIdRef.current) : null;
+    if (piperKey) {
+      // neural voice: load the model (instant when it is already loaded)
+      try { await loadPiperVoice(piperKey); }
+      catch (e: any) {
+        if (sessionRef.current === sessionToken) Alert.alert("Natural voice", String(e?.message ?? e));
+        setIsReading(false);
+        return;
       }
-      setIsReading(false);
-      return;
-    }
-    try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
-    // una voce specifica porta con se' la sua lingua; impostare la lingua
-    // dopo la voce la sovrascriverebbe, quindi sono alternative.
-    if (voiceIdRef.current) {
-      try { await Tts.setDefaultVoice(voiceIdRef.current); }
-      catch { try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {} }
+      if (sessionRef.current !== sessionToken) return;
     } else {
-      try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {}
+      const ready = await ensureTtsReady();
+      if (sessionRef.current !== sessionToken) return;
+      if (!ready) {
+        if (!ttsErrorShownRef.current) {
+          ttsErrorShownRef.current = true;
+          Alert.alert(
+            "Text to speech",
+            "The phone's speech engine is not ready yet. Wait a few seconds and try again; if it persists, open Android Settings › Language & input › Text-to-speech and check that a voice is installed, or pick a natural voice in Settings › Voice."
+          );
+        }
+        setIsReading(false);
+        return;
+      }
+      try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
+      // una voce specifica porta con se' la sua lingua; impostare la lingua
+      // dopo la voce la sovrascriverebbe, quindi sono alternative.
+      if (voiceIdRef.current) {
+        try { await Tts.setDefaultVoice(voiceIdRef.current); }
+        catch { try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {} }
+      } else {
+        try { await Tts.setDefaultLanguage(DEVICE_LANG); } catch {}
+      }
     }
     await safeStop();
+    // Android 13+: the media card (lock screen controls) needs this once
+    if (!notifAskedRef.current) {
+      notifAskedRef.current = true;
+      await askNotificationPermission();
+      if (sessionRef.current !== sessionToken) return;
+    }
 
     setIsReading(true);
     setIsPaused(false);
 
     let i = Math.max(0, Math.min(startIndex, segs.length - 1));
+    const first = i;
     setCurrentIdx(i);
     if (fileIdRef.current) await saveProgress(fileIdRef.current, i);
+    notifyPlayback(true, i);
 
+    let sleptOff = false;
     for (; i < segs.length; i++) {
       if (sessionRef.current !== sessionToken) break;
       if (stopRef.current) break;
+      // sleep timer due: stop here, Play resumes from this very block
+      const sl = sleepRef.current;
+      if (sl.mode !== "off" && i > first) {
+        const due = sl.mode === "chapter" ? i > sl.chapterEnd : Date.now() >= sl.until;
+        if (due) { sleptOff = true; break; }
+      }
 
       setCurrentIdx(i);
       if (fileIdRef.current) await saveProgress(fileIdRef.current, i);
+      notifyPlayback(true, i);
 
-      const ok = await speakOne(segs[i]);
+      const ok = await speakOne(segs[i], i, sessionToken);
+      if (ok === "skip") continue;
       if (!ok && !ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
         Alert.alert("Text to speech", "Some parts cannot be read by the voice. Lower the speed or pick another voice.");
       }
+      if (piperKey && i + 1 < segs.length) {
+        // synthesise the next sentence while this one plays: no gap between them
+        const next = sanitizeForTts(mdToPlain(segs[i + 1]));
+        if (next) piper.prepare(`${sessionToken}:${i + 1}`, next, rateRef.current);
+      }
       await waitTtsDone(sessionToken, 60000);
+      if (sessionRef.current === sessionToken) setSpokenWord(null);
     }
 
     if (sessionRef.current === sessionToken) {
       setIsReading(false);
-      setIsPaused(false);
+      setIsPaused(sleptOff);
+      if (sleptOff) clearSleep();
+      clearSpoken();
+      notifyPlayback(false);
     }
   };
 
@@ -1560,11 +1739,26 @@ function AppInner() {
   };
 
   const skipSegment = (delta: number) => {
-    const next = Math.max(0, Math.min(currentIdx + delta, Math.max(0, segmentsRef.current.length - 1)));
+    const next = Math.max(0, Math.min(currentIdxRef.current + delta, Math.max(0, segmentsRef.current.length - 1)));
     setCurrentIdx(next);
-    if (fileId) saveProgress(fileId, next).catch(() => {});
-    if (isReading) hardStop().then(() => speakFrom(next));
+    if (fileIdRef.current) saveProgress(fileIdRef.current, next).catch(() => {});
+    if (isReadingRef.current) hardStop().then(() => speakFrom(next));
   };
+
+  // buttons of the media card / headset / audio focus, always on the latest closures
+  const actionsRef = useRef({ speakFrom, pause, skipSegment, hardStop });
+  actionsRef.current = { speakFrom, pause, skipSegment, hardStop };
+  useEffect(() => {
+    return playback.onAction((a) => {
+      const act = actionsRef.current;
+      if (!segmentsRef.current.length) { playback.stop(); return; }
+      if (a === "play") { if (!isReadingRef.current) act.speakFrom(currentIdxRef.current); }
+      else if (a === "pause") { if (isReadingRef.current) act.pause(); }
+      else if (a === "next") act.skipSegment(1);
+      else if (a === "prev") act.skipSegment(-1);
+      else if (a === "stop") act.hardStop().then(() => playback.stop());
+    });
+  }, []);
 
   const skipToChapter = (ch: Chapter) => {
     setChaptersOpen(false);
@@ -1598,6 +1792,16 @@ function AppInner() {
     setVoiceId(id);
     voiceIdRef.current = id;
     await hardStop();
+    if (isPiperVoice(id)) {
+      const k = piperKeyOf(id);
+      if (!k) return;
+      try { await loadPiperVoice(k); }
+      catch (e: any) { Alert.alert("Natural voice", String(e?.message ?? e)); return; }
+      spokenRef.current = null;
+      const phrase = PIPER_VOICES[k].lang.startsWith("it") ? "Ciao, questa è la voce selezionata." : "Hi, this is the selected voice.";
+      try { await piper.speak("preview", phrase, rateRef.current); } catch {}
+      return;
+    }
     const ready = await ensureTtsReady(4000);
     if (!ready) return;
     try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
@@ -1609,6 +1813,56 @@ function AppInner() {
     const lang = (id ? voices.find((v) => v.id === id)?.language : DEVICE_LANG) || DEVICE_LANG;
     const phrase = lang.toLowerCase().startsWith("it") ? "Ciao, questa è la voce selezionata." : "Hi, this is the selected voice.";
     try { await Tts.speak(phrase); } catch {}
+  };
+
+  // neural voices: download once (with progress), then select; ✕ removes the files
+  const downloadVoice = async (k: PiperVoiceKey) => {
+    const v = PIPER_VOICES[k];
+    const ok = await askChoice(
+      "DOWNLOAD THE VOICE?",
+      `${v.label} — ${v.note}. Downloaded once, then it speaks offline. Wi‑Fi recommended.`,
+      "🗣️",
+      [{ key: "yes", icon: "⬇️", label: "Download", color: MINT }]
+    );
+    if (ok !== "yes") return false;
+    setIsExtracting(true);
+    setTask({ title: "DOWNLOADING THE VOICE", sub: v.note, progress: 0, cancel: cancelPiperDownload });
+    try {
+      await downloadPiperVoice(k, (st) =>
+        st === "unpacking"
+          ? setTask({ title: "UNPACKING THE VOICE", sub: v.label })
+          : setTask({ title: "DOWNLOADING THE VOICE", sub: v.note, progress: st, cancel: cancelPiperDownload })
+      );
+      await refreshPiperReady();
+      return true;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg !== "Cancelled") Alert.alert("Natural voice", msg);
+      return false;
+    } finally {
+      setTask(null);
+      setIsExtracting(false);
+    }
+  };
+
+  const onSelectPiper = async (k: PiperVoiceKey) => {
+    if (!piperReady[k]) {
+      setVoicesOpen(false);
+      if (!(await downloadVoice(k))) return;
+    }
+    await onSelectVoice(PIPER_PREFIX + k);
+  };
+
+  const removePiperVoice = async (k: PiperVoiceKey) => {
+    const v = PIPER_VOICES[k];
+    const ok = await askChoice("REMOVE THE VOICE?", `${v.label} is deleted from the phone. You can download it again later.`, "🗑️", [
+      { key: "yes", icon: "🗑️", label: "Remove", color: CORAL },
+    ]);
+    if (ok !== "yes") return;
+    await hardStop();
+    await deletePiperVoice(k);
+    if (voiceIdRef.current === PIPER_PREFIX + k) { setVoiceId(null); voiceIdRef.current = null; }
+    await refreshPiperReady();
   };
 
   const openInstallVoices = async () => {
@@ -1957,6 +2211,84 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
   };
 
+  // Library: the whole document spoken by the natural voice into one .m4a
+  // (saved in Download/LeggiMi first, then cloud or share like every export)
+  const exportAudiobook = async (e: LibraryEntry) => {
+    const key = isPiperVoice(voiceIdRef.current) ? piperKeyOf(voiceIdRef.current) : null;
+    if (!key) {
+      const pick = await askChoice(
+        "NATURAL VOICE NEEDED",
+        "Audiobooks are made with a natural voice, which runs on the phone. Pick one first (Settings › Voice).",
+        "🗣️",
+        [{ key: "voice", icon: "🗣️", label: "Choose a voice", color: MINT }]
+      );
+      if (pick === "voice") setVoicesOpen(true);
+      return;
+    }
+    let text = "";
+    try { text = await RNFS.readFile(e.textPath, "utf8"); }
+    catch { Alert.alert("Audiobook", "The saved text of this document is gone. Open it again from its app."); return; }
+    const texts = segmentIntoSentences(text, { markdown: !!e.markdown })
+      .map((x) => sanitizeForTts(mdToPlain(x)))
+      .filter(Boolean);
+    if (!texts.length) { Alert.alert("Audiobook", "Nothing to read in this document."); return; }
+    const words = texts.reduce((n, t) => n + t.split(" ").length, 0);
+    const minutes = Math.max(1, Math.round(words / (150 * rateRef.current)));
+    const length = minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
+    const go = await askChoice(
+      "MAKE THE AUDIOBOOK?",
+      `“${e.name}” read by ${PIPER_VOICES[key].label}: about ${length} of audio in one .m4a file, saved in Download/LeggiMi. Making it takes a while: keep the app open.`,
+      "🎧",
+      [{ key: "go", icon: "🎧", label: "Make it", sub: `${texts.length} sentences · speed ${rateRef.current.toFixed(2)}×`, color: MINT }]
+    );
+    if (go !== "go") return;
+    await hardStop();
+    const base = safeFileName(e.name.replace(/\.[a-z0-9]{2,4}$/i, ""));
+    const name = `${base}.m4a`;
+    const dir = `${RNFS.CachesDirectoryPath}/export`;
+    await RNFS.mkdir(dir).catch(() => {});
+    const wav = `${dir}/${base}.wav`;
+    const out = `${dir}/${name}`;
+    await RNFS.unlink(wav).catch(() => {});
+    await RNFS.unlink(out).catch(() => {});
+    const cancel = () => { piper.stop(); };
+    setIsExtracting(true);
+    setTask({ title: "MAKING THE AUDIOBOOK", sub: `0 / ${texts.length} sentences`, progress: 0, cancel });
+    const unsub = piper.onFileProgress((done, total) =>
+      setTask({ title: "MAKING THE AUDIOBOOK", sub: `${done} / ${total} sentences`, progress: total ? done / total : 0, cancel })
+    );
+    try {
+      await loadPiperVoice(key);
+      await piper.synthesizeToWav(texts, rateRef.current, wav);
+      setTask({ title: "ENCODING THE AUDIO", sub: name });
+      await piper.encodeToM4a(wav, out);
+      await RNFS.unlink(wav).catch(() => {});
+      const where = await scanNative.saveToDownloads(out, name, "audio/mp4");
+      setTask(null);
+      setIsExtracting(false);
+      const next = await askChoice(
+        "SAVED",
+        `${name}
+is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
+        "✅",
+        [
+          { key: "cloud", icon: "☁️", label: "Cloud", sub: "Into the LeggiMi folder of your cloud", color: GRAPE },
+          { key: "share", icon: "📤", label: "Share", sub: "Send it to another app", color: SKY },
+        ]
+      );
+      if (next === "cloud") setCloudOpen({ file: { path: out, name, mime: "audio/mp4" } });
+      else if (next === "share") await scanNative.shareFile(out, "audio/mp4", name);
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (!/cancel/i.test(msg)) Alert.alert("Audiobook", msg);
+    } finally {
+      unsub();
+      setTask(null);
+      setIsExtracting(false);
+      RNFS.unlink(wav).catch(() => {});
+    }
+  };
+
   // Library: save a document (always to Download/LeggiMi first), then cloud or share
   const exportFromLibrary = async (e: LibraryEntry) => {
     setLibraryOpen(false);
@@ -1967,7 +2299,8 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     if (e.textPath) {
       opts.push(
         { key: "pdf", icon: "📕", label: "Text as PDF", sub: "Saved in Download/LeggiMi, then cloud or share", color: CORAL },
-        { key: "txt", icon: "📄", label: "Text file (.txt)", sub: "Saved in Download/LeggiMi, then cloud or share", color: YELLOW }
+        { key: "txt", icon: "📄", label: "Text file (.txt)", sub: "Saved in Download/LeggiMi, then cloud or share", color: YELLOW },
+        { key: "audio", icon: "🎧", label: "Audiobook (.m4a)", sub: "Spoken by the natural voice, saved in Download/LeggiMi", color: MINT }
       );
     }
     if (!opts.length) {
@@ -1979,6 +2312,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
       setScanOpen({ docId: e.scanId, start: "export" });
       return;
     }
+    if (k === "audio") { await exportAudiobook(e); return; }
     if (k !== "pdf" && k !== "txt") return;
     try {
       const text = stripMarkers(await RNFS.readFile(e.textPath, "utf8"));
@@ -2450,9 +2784,10 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         fontSize={fontSize}
         palette={palette}
         onPress={onPressSegment}
+        word={spokenWord && spokenWord.idx === currentIdx && currentIdx >= item.start && currentIdx < item.end ? spokenWord : null}
       />
     ),
-    [segments, currentIdx, fontSize, palette, onPressSegment]
+    [segments, currentIdx, fontSize, palette, onPressSegment, spokenWord]
   );
 
   const busy = isExtracting;
@@ -2598,6 +2933,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               {hasDoc ? (
                 <Text numberOfLines={1} style={s.docSub}>
                   {currentChapterIdx >= 0 ? `${chapters[currentChapterIdx].title} · ` : ""}block {currentIdx + 1}/{segments.length}
+                  {sleepLeft ? ` · 🌙 ${sleepLeft}` : ""}
                 </Text>
               ) : (
                 <Text numberOfLines={1} style={s.docSub}>Reading the file…</Text>
@@ -2681,7 +3017,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               data={listData}
               keyExtractor={(r) => String(r.start)}
               renderItem={renderItem}
-              extraData={`${currentIdx}|${fontSize}|${themeName}`}
+              extraData={`${currentIdx}|${fontSize}|${themeName}|${spokenWord?.start ?? -1}`}
               initialNumToRender={20}
               maxToRenderPerBatch={20}
               windowSize={21}
@@ -2828,6 +3164,20 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 />
               </ComicBox>
 
+              <Text style={s.sheetLabel}>Sleep timer{sleepLeft ? ` · ${sleepLeft}` : ""}</Text>
+              <View style={s.chipRow}>
+                {(["off", "15", "30", "45", "60", "chapter"] as const).map((m) => (
+                  <ComicChip
+                    key={m}
+                    text={m === "off" ? "Off" : m === "chapter" ? "End of chapter" : `${m} min`}
+                    selected={sleepMode === m}
+                    onPress={() => setSleep(m)}
+                    palette={palette}
+                    color={GRAPE}
+                  />
+                ))}
+              </View>
+
               <Text style={s.sheetLabel}>Voice</Text>
               <ComicBox
                 palette={palette}
@@ -2902,6 +3252,43 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             </View>
             <Text style={s.voiceHint}>Tap a voice to hear a preview. Your choice is saved automatically.</Text>
             <ScrollView style={{ marginTop: 10, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
+              <Text style={s.sheetLabel}>Natural voices · on the phone</Text>
+              {PIPER_KEYS.map((k) => {
+                const v = PIPER_VOICES[k];
+                const id = PIPER_PREFIX + k;
+                const active = voiceId === id;
+                const ready = !!piperReady[k];
+                return (
+                  <ComicBox
+                    key={id}
+                    palette={palette}
+                    color={active ? YELLOW : palette.surface}
+                    radius={14}
+                    stroke={active ? 3 : 2}
+                    shadow={active ? 4 : 2}
+                    onPress={() => onSelectPiper(k)}
+                    style={s.listItem}
+                    contentStyle={s.chapterRow}
+                  >
+                    <View style={{ flex: 1, paddingRight: 10 }}>
+                      <Text style={[s.chapterText, active && { color: INK, fontFamily: FONT_BOLD }]} numberOfLines={1}>
+                        {v.label}
+                      </Text>
+                      <Text style={[s.voiceMeta, active && { color: INK }]} numberOfLines={1}>
+                        {ready ? `${v.note.replace(/ · \d+ MB.*$/, "")} · on the phone` : `${v.note} · tap to download`}
+                      </Text>
+                    </View>
+                    {active ? (
+                      <Text style={s.voiceCheck}>✓</Text>
+                    ) : ready ? (
+                      <ComicIconButton icon="✕" onPress={() => removePiperVoice(k)} palette={palette} color={CORAL} size={28} fontSize={12} />
+                    ) : (
+                      <Text style={s.voiceCheck}>⬇️</Text>
+                    )}
+                  </ComicBox>
+                );
+              })}
+              <Text style={s.sheetLabel}>System voices</Text>
               <ComicBox
                 palette={palette}
                 color={!voiceId ? YELLOW : palette.surface}
@@ -2912,7 +3299,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 style={s.listItem}
                 contentStyle={s.chapterRow}
               >
-                <Text style={[s.chapterText, !voiceId && { color: INK, fontFamily: FONT_BOLD }]}>Predefinita di sistema</Text>
+                <Text style={[s.chapterText, !voiceId && { color: INK, fontFamily: FONT_BOLD }]}>System default</Text>
                 {!voiceId ? <Text style={s.voiceCheck}>✓</Text> : null}
               </ComicBox>
               {voices.map((v, idx) => {

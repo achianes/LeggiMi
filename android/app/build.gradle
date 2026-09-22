@@ -73,6 +73,12 @@ def enableProguardInReleaseBuilds = false
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
 android {
+    packagingOptions {
+        jniLibs {
+            // 32-bit ABIs and the C/C++ API of sherpa-onnx are never used here: half the APK
+            excludes += ["lib/x86/**", "lib/armeabi-v7a/**", "**/libsherpa-onnx-c-api.so", "**/libsherpa-onnx-cxx-api.so"]
+        }
+    }
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
@@ -116,6 +122,12 @@ dependencies {
     // cloud export: Google sign-in for Drive, OkHttp (same version React Native ships) for WebDAV/Drive/Dropbox
     implementation("com.google.android.gms:play-services-auth:21.5.1")
     implementation("com.squareup.okhttp3:okhttp:4.9.2")
+    // media session + media-style notification for reading in the background
+    implementation("androidx.media:media:1.7.0")
+    // neural voices on the phone: Piper models run by sherpa-onnx (AAR with the jni libs);
+    // commons-compress unpacks the .tar.bz2 voice packages
+    implementation(files("libs/sherpa-onnx-1.13.8.aar"))
+    implementation("org.apache.commons:commons-compress:1.28.0")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

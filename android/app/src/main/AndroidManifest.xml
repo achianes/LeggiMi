@@ -2,6 +2,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- reading aloud goes on with the screen off: media notification + wake lock -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- only Android 9 and older need it to save exports in the public Download folder -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
@@ -43,6 +47,16 @@
 			android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
 			android:value="com.reactnative.googlecast.GoogleCastOptionsProvider" />
       </activity>
+
+      <!-- Reading aloud in the background: media controls, headset buttons, audio focus -->
+      <service
+        android:name=".playback.LeggiMiPlaybackService"
+        android:exported="false"
+        android:foregroundServiceType="mediaPlayback">
+        <intent-filter>
+          <action android:name="android.intent.action.MEDIA_BUTTON" />
+        </intent-filter>
+      </service>
 
       <!-- Virtual printer: "print" from any app to have it read aloud -->
       <service

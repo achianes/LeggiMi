@@ -67,8 +67,13 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
 - **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences, and paragraphs cut by a page break (a line ending in “and”, “of”, “e”, “di”…) are joined back too. Leftovers of images such as “[]” are dropped.
 - **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings; dot leaders are not needed, numbered titles like “7. Back home” are chapters rather than list items, titles wrapped on two lines are glued back, and the index itself is not read aloud); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
-- **Voices**: every installed TTS voice, the phone's language first, with a one-tap preview.
-- **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2×.
+- **Natural voices, on the phone**: Piper neural voices (Paola and Riccardo for Italian, Amy, Ryan, Alan and Alba for English) run locally through sherpa-onnx. Each voice is downloaded once (13–21 MB) from Settings › Voice; after that it speaks offline, with the next sentence synthesised while the current one plays. They also work on phones that have no system speech engine at all.
+- **System voices**: every installed TTS voice too, the phone's language first, with a one-tap preview.
+- **Word by word**: inside the highlighted sentence the word being spoken is underlined (system voices report it; natural voices estimate it from the playback position).
+- **Keeps reading in the background**: with the screen off, in another app, in the car. A media card with Previous · Play/Pause · Next · Stop sits in the notification shade and on the lock screen; headset buttons work; a phone call pauses the reading and it resumes when the call ends; unplugging the headphones pauses it.
+- **Sleep timer**: 15, 30, 45 or 60 minutes, or “end of chapter”. The countdown shows in the document card; Play resumes from the very sentence where it stopped.
+- **Audiobook**: from the Library, 📤 › **Audiobook (.m4a)** turns the whole document into one AAC file spoken by the natural voice, saved in Download/LeggiMi and then, if you like, sent to the cloud or shared.
+- **Comfort**: comic-style light, sepia and dark themes, adjustable text size, speed from 0.5× to 2× (natural voices follow it too).
 
 ### Getting documents in
 - **Open** any file with the 📂 button.
@@ -138,7 +143,8 @@ The app needs no storage permission on Android 10+. On Android 9 it asks for it 
 ### Reading
 1. Tap 📂 to open a file, or share one to LeggiMi from any app.
 2. Press ▶ to start. Tap any sentence to jump there.
-3. **⚙️** opens the settings: cloud accounts (first), theme, text size, speed, voice, speech model.
+3. **⚙️** opens the settings: cloud accounts (first), theme, text size, speed, sleep timer, voice, speech model.
+5. Turn the screen off or switch app: the reading goes on. Use the media card in the notification shade or on the lock screen, or the headset buttons.
 4. ☰ opens the chapter index. 🕘 opens the Library.
 
 ### Printing to LeggiMi
@@ -169,6 +175,8 @@ Share a picture and pick one of the four options. Share a recording and choose *
 You can change it later in **⚙️ › Speech to text**.
 
 ### Voices
+Settings › Voice lists the **natural voices** first: tap one to download it (a progress card shows the download and the unpacking), then it is selected and previewed. ✕ next to a downloaded voice removes its files. Below them are the phone's own voices. To make an **audiobook**, pick a natural voice, open the Library and choose 📤 › Audiobook: the whole document is synthesised into one .m4a (about a minute of work for every few minutes of audio, depending on the phone) with a progress card you can cancel.
+
 LeggiMi reads with the phone's language by default. Go to **⚙️ › Voice** to choose another voice. Voices are listed as “Language · code”, with the phone's language first. Tap one to hear a preview. **Install more voices…** opens Android's text-to-speech settings.
 
 ---
@@ -273,6 +281,8 @@ src/scan/ScanStudio.tsx               # scanner workspace: pages, crop editor, f
 src/scan/store.ts                     # scanned documents, OCR, bridge to the native scanner
 src/audio/transcribe.ts               # speech models, audio decoding, whisper transcription
 src/cloud/cloud.ts, CloudSheet.tsx    # cloud providers, accounts, upload sheet
+src/speech/piper.ts                   # natural voices: catalogue, download/unpack, speak, audiobook
+src/playback/playback.ts              # media card / background reading bridge
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
   print/LeggiMiPrintService.kt        # the virtual printer
@@ -282,6 +292,10 @@ android/app/src/main/java/com/leggimimobile/
   scan/AudioDecoder.kt                # any audio -> 16 kHz mono WAV
   cloud/LeggiMiCloudModule.kt         # WebDAV, Google Drive, Dropbox
   cloud/SecretStore.kt                # Keystore-encrypted secrets
+  playback/LeggiMiPlaybackService.kt  # foreground media service: notification, media session, focus, wake lock
+  piper/LeggiMiPiperModule.kt         # sherpa-onnx Piper voices: unpack, load, speak, WAV synthesis
+  piper/AacEncoder.kt                 # WAV -> .m4a with MediaCodec
+android/app/libs/sherpa-onnx-*.aar    # sherpa-onnx runtime (onnxruntime + JNI)
 android/app/src/main/assets/pdfjs/    # offline pdf.js
 android/app/src/main/assets/fonts/    # Luckiest Guy + Comic Neue
 android/app/src/main/res/drawable/ic_launcher_*.xml   # adaptive launcher icon
@@ -292,7 +306,7 @@ docs/icon/generate_icons.py           # renders the icon to the legacy PNGs
 
 ## Tech stack
 
-React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner) · whisper.cpp via whisper.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
+React Native 0.83 (New Architecture, Hermes) · Kotlin · react-native-tts · [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) with [Piper](https://github.com/rhasspy/piper) voices · Android MediaSession / MediaCodec · pdf.js · JSZip · Google ML Kit (Text Recognition, Document Scanner) · whisper.cpp via whisper.rn · OkHttp · Google Identity (Authorization API) · Android PrintService · react-native-receive-sharing-intent · react-native-webview · AsyncStorage · react-native-fs · react-native-safe-area-context.
 
 Fonts: [Luckiest Guy](https://fonts.google.com/specimen/Luckiest+Guy) and [Comic Neue](https://fonts.google.com/specimen/Comic+Neue) (SIL Open Font License).
 
@@ -312,4 +326,7 @@ If this saved you an argument about who forgot the water bill:
 - The camera scanner needs Google Play services. Without them, use **Photos** in the scan studio: pictures are imported, auto-cropped and can be edited the same way.
 - Transcription speed depends on the phone and the model. On older phones pick “Fast”; switch to “Accurate” when the text matters more than the wait.
 - Links shared to LeggiMi are not fetched: share the page text or a file instead.
+- Natural voices are Italian and English for now; more Piper languages can be added to the catalogue in `src/speech/piper.ts`. A natural voice takes a moment to load the first time it speaks after the app starts.
+- The APK ships 64-bit libraries only (arm64-v8a and x86_64).
+- Audiobooks are one .m4a per document, without chapter markers.
 - Google Drive needs the one-time Google Cloud registration described above. Until then it shows an explanatory message.
