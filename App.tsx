@@ -40,7 +40,7 @@ import {
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
 import { extractEpub } from "./src/docs/epub";
-import { LLM_MODELS, LLM_DEFAULT, hasLlm, deleteLlm, downloadLlm, cancelLlmDownload, loadLlm, askLlm, stopLlm, AskKind } from "./src/ai/llm";
+import { LLM_MODELS, LLM_KEYS, LlmKey, getLlmKey, setLlmKey, hasLlm, deleteLlm, downloadLlm, cancelLlmDownload, loadLlm, askLlm, stopLlm, AskKind } from "./src/ai/llm";
 import { LANGS, langName as translationLangName, detectLanguage, translateDocument, cancelTranslation, translateAvailable } from "./src/translate/translate";
 import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
@@ -1918,23 +1918,30 @@ function AppInner() {
   const [ai, setAi] = useState<AiState | null>(null);
   const aiRef = useRef<AiState | null>(null);
   useEffect(() => { aiRef.current = ai; }, [ai]);
+  const [llmKey, setLlmKeyState] = useState<LlmKey>("gemma1b");
   const [llmReady, setLlmReady] = useState(false);
-  useEffect(() => { hasLlm().then(setLlmReady); }, []);
+  const refreshLlm = useCallback(async () => {
+    const k = await getLlmKey();
+    setLlmKeyState(k);
+    setLlmReady(await hasLlm(k));
+  }, []);
+  useEffect(() => { refreshLlm(); }, [refreshLlm]);
 
   const ensureLlm = async (): Promise<boolean> => {
-    if (await hasLlm()) return true;
-    const m = LLM_MODELS[LLM_DEFAULT];
+    const k = await getLlmKey();
+    if (await hasLlm(k)) return true;
+    const m = LLM_MODELS[k];
     const ok = await askChoice(
       "DOWNLOAD THE ASSISTANT?",
-      `Explanations and summaries are made on the phone by ${m.label} (${m.note}). It is downloaded once — Wi‑Fi strongly recommended — and nothing you read ever leaves the device.`,
+      `Explanations and summaries are made on the phone by ${m.name} (${m.note}). It is downloaded once — Wi‑Fi strongly recommended — and nothing you read ever leaves the device.`,
       "💡",
-      [{ key: "yes", icon: "⬇️", label: "Download", sub: m.note, color: MINT }]
+      [{ key: "yes", icon: "⬇️", label: `Download ${m.name}`, sub: m.note, color: MINT }]
     );
     if (ok !== "yes") return false;
     setIsExtracting(true);
-    setTask({ title: "DOWNLOADING THE ASSISTANT", sub: m.note, progress: 0, cancel: cancelLlmDownload });
+    setTask({ title: "DOWNLOADING THE ASSISTANT", sub: `${m.name} · ${m.note}`, progress: 0, cancel: cancelLlmDownload });
     try {
-      await downloadLlm(LLM_DEFAULT, (f) => setTask({ title: "DOWNLOADING THE ASSISTANT", sub: m.note, progress: f, cancel: cancelLlmDownload }));
+      await downloadLlm(k, (f) => setTask({ title: "DOWNLOADING THE ASSISTANT", sub: `${m.name} · ${m.note}`, progress: f, cancel: cancelLlmDownload }));
       setLlmReady(true);
       return true;
     } catch (e: any) {
@@ -1983,9 +1990,10 @@ function AppInner() {
     const lang = (await detectLanguage(passage.slice(0, 2000))) ?? cur.lang;
     setAi((a) => (a ? { ...a, kind, passage, lang, answer: "", busy: true, stage: "Loading the model…" } : a));
     try {
-      await loadLlm(LLM_DEFAULT, (f) => setAi((a) => (a ? { ...a, stage: `Loading the model… ${Math.round(f * 100)}%` } : a)));
+      const k = await getLlmKey();
+      await loadLlm(k, (f) => setAi((a) => (a ? { ...a, stage: `Loading the model… ${Math.round(f * 100)}%` } : a)));
       setAi((a) => (a ? { ...a, stage: "Thinking…" } : a));
-      const answer = await askLlm(kind, passage, translationLangName(lang), (partial) => setAi((a) => (a ? { ...a, answer: partial, stage: "" } : a)));
+      const answer = await askLlm(kind, passage, translationLangName(lang), (partial) => setAi((a) => (a ? { ...a, answer: partial, stage: "" } : a)), k);
       setAi((a) => (a ? { ...a, answer, busy: false, stage: "" } : a));
     } catch (e: any) {
       setAi((a) => (a ? { ...a, busy: false, stage: "", answer: a.answer || `Something went wrong: ${String(e?.message ?? e)}` } : a));
@@ -2007,13 +2015,36 @@ function AppInner() {
     setAi(null);
   };
 
-  const removeLlm = async () => {
-    const ok = await askChoice("REMOVE THE ASSISTANT?", `${LLM_MODELS[LLM_DEFAULT].label} is deleted from the phone (${LLM_MODELS[LLM_DEFAULT].note.split(" · ")[0]} freed). You can download it again later.`, "🗑️", [
-      { key: "yes", icon: "🗑️", label: "Remove", color: CORAL },
-    ]);
-    if (ok !== "yes") return;
-    await deleteLlm();
-    setLlmReady(false);
+  // Settings › Assistant: pick the model (Fast / Better / Best), download or remove it
+  const chooseLlm = async () => {
+    setSettingsOpen(false);
+    const have: Partial<Record<LlmKey, boolean>> = {};
+    for (const k of LLM_KEYS) have[k] = await hasLlm(k);
+    const cur = await getLlmKey();
+    const pick = await askChoice(
+      "ASSISTANT MODEL",
+      "Bigger models explain and summarise better but answer more slowly. All of them run on the phone; the current one is marked ✓.",
+      "💡",
+      LLM_KEYS.map((k) => ({
+        key: k,
+        icon: k === "gemma1b" ? "🐇" : k === "qwen3b" ? "🦉" : "🐘",
+        label: `${LLM_MODELS[k].label} · ${LLM_MODELS[k].name}${k === cur ? " ✓" : ""}`,
+        sub: `${LLM_MODELS[k].note}${have[k] ? " · on the phone" : ""}`,
+        color: have[k] ? MINT : palette.surface,
+      }))
+    );
+    if (!pick) return;
+    const k = pick as LlmKey;
+    await setLlmKey(k);
+    if (have[k]) {
+      const act = await askChoice(LLM_MODELS[k].name, "It is on the phone and selected.", "💡", [
+        { key: "remove", icon: "🗑️", label: "Remove it from the phone", sub: `${LLM_MODELS[k].note.split(" · ")[0]} freed`, color: CORAL },
+      ]);
+      if (act === "remove") await deleteLlm(k);
+    } else {
+      await ensureLlm();
+    }
+    await refreshLlm();
   };
 
   // Live reading: the camera activity hands over the text it sees, this queue
@@ -3588,17 +3619,13 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 palette={palette}
                 radius={16}
                 shadow={4}
-                onPress={async () => {
-                  setSettingsOpen(false);
-                  if (llmReady) await removeLlm();
-                  else if (await ensureLlm()) Alert.alert("Assistant", "Ready. Long‑press any sentence while reading to have it explained, simplified or summarised.");
-                }}
+                onPress={chooseLlm}
                 contentStyle={s.rowSelect}
               >
                 <Text style={s.rowSelectEmoji}>💡</Text>
                 <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={s.rowSelectText} numberOfLines={1}>{LLM_MODELS[LLM_DEFAULT].label}{llmReady ? " · on the phone" : " · not downloaded"}</Text>
-                  <Text style={s.libMeta} numberOfLines={1}>Long‑press a sentence: explain, simplify, summarise · {llmReady ? "tap to remove" : LLM_MODELS[LLM_DEFAULT].note}</Text>
+                  <Text style={s.rowSelectText} numberOfLines={1}>{LLM_MODELS[llmKey].label} · {LLM_MODELS[llmKey].name}{llmReady ? "" : " · not downloaded"}</Text>
+                  <Text style={s.libMeta} numberOfLines={1}>Long‑press a sentence: explain, simplify, summarise</Text>
                 </View>
                 <Text style={s.rowSelectChevron}>›</Text>
               </ComicBox>

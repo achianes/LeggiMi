@@ -2,19 +2,46 @@
 // summarises and simplifies what is being read. The model is downloaded once;
 // after that nothing leaves the device.
 import RNFS from "react-native-fs";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { initLlama, LlamaContext, releaseAllLlama } from "llama.rn";
 
-export type LlmKey = "gemma1b";
-export const LLM_MODELS: Record<LlmKey, { file: string; url: string; bytes: number; label: string; note: string }> = {
+export type LlmKey = "gemma1b" | "qwen3b" | "gemma4b";
+export const LLM_MODELS: Record<LlmKey, { file: string; url: string; bytes: number; label: string; name: string; note: string }> = {
   gemma1b: {
     file: "google_gemma-3-1b-it-Q4_K_M.gguf",
     url: "https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf",
     bytes: 806058496,
-    label: "Gemma 3 1B",
-    note: "806 MB · Google's small open model, many languages",
+    label: "Fast",
+    name: "Gemma 3 1B",
+    note: "806 MB · quick answers, plain quality",
+  },
+  qwen3b: {
+    file: "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+    url: "https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+    bytes: 1929903264,
+    label: "Better",
+    name: "Qwen2.5 3B",
+    note: "1.9 GB · much better summaries, about half the speed",
+  },
+  gemma4b: {
+    file: "google_gemma-3-4b-it-Q4_K_M.gguf",
+    url: "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
+    bytes: 2489758112,
+    label: "Best",
+    name: "Gemma 3 4B",
+    note: "2.5 GB · the strongest in many languages, slowest; needs 6 GB of RAM",
   },
 };
+export const LLM_KEYS: LlmKey[] = ["gemma1b", "qwen3b", "gemma4b"];
 export const LLM_DEFAULT: LlmKey = "gemma1b";
+const KEY_SETTING = "settings:llmModel";
+export async function getLlmKey(): Promise<LlmKey> {
+  const v = await AsyncStorage.getItem(KEY_SETTING).catch(() => null);
+  return v === "qwen3b" || v === "gemma4b" || v === "gemma1b" ? v : LLM_DEFAULT;
+}
+export async function setLlmKey(k: LlmKey) {
+  await AsyncStorage.setItem(KEY_SETTING, k);
+}
 const DIR = `${RNFS.DocumentDirectoryPath}/llm`;
 export const llmPath = (k: LlmKey) => `${DIR}/${LLM_MODELS[k].file}`;
 
@@ -29,7 +56,7 @@ export async function hasLlm(k: LlmKey = LLM_DEFAULT) {
 }
 
 export async function deleteLlm(k: LlmKey = LLM_DEFAULT) {
-  await releaseLlm();
+  if (ctxKey === k) await releaseLlm();
   await RNFS.unlink(llmPath(k)).catch(() => {});
 }
 
@@ -113,8 +140,8 @@ export function buildMessages(kind: AskKind, text: string, langName: string) {
 }
 
 /** streams the answer; resolves with the full text */
-export async function askLlm(kind: AskKind, text: string, langName: string, onToken: (partial: string) => void): Promise<string> {
-  const c = await loadLlm();
+export async function askLlm(kind: AskKind, text: string, langName: string, onToken: (partial: string) => void, key?: LlmKey): Promise<string> {
+  const c = await loadLlm(key ?? (await getLlmKey()));
   let out = "";
   const res = await c.completion(
     {
