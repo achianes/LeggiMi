@@ -16,6 +16,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -71,18 +72,25 @@ class LeggiMiPlaybackService : Service() {
         }
     }
 
+    /** when the service itself asked JS to pause because of a focus loss */
+    private var focusPauseAt = 0L
+
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
+                // another player took over for good: stop here, no automatic resume
                 resumeOnFocusGain = false
-                if (playing) listener?.invoke("pause")
+                if (playing) { focusPauseAt = SystemClock.uptimeMillis(); listener?.invoke("pause") }
             }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 // a call, a navigation prompt: pause and come back afterwards
-                if (playing) { resumeOnFocusGain = true; listener?.invoke("pause") }
+                if (playing) { resumeOnFocusGain = true; focusPauseAt = SystemClock.uptimeMillis(); listener?.invoke("pause") }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // a notification sound: the system lowers our volume for a moment, keep reading
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                if (resumeOnFocusGain) { resumeOnFocusGain = false; listener?.invoke("play") }
+                if (resumeOnFocusGain && !playing) { resumeOnFocusGain = false; listener?.invoke("play") }
             }
         }
     }
@@ -131,6 +139,10 @@ class LeggiMiPlaybackService : Service() {
     fun applyState(newTitle: String, newSubtitle: String, newPlaying: Boolean) {
         title = newTitle
         subtitle = newSubtitle
+        // a pause that is not the echo of our own focus-loss pause is the user's:
+        // then nothing must resume the reading behind their back
+        if (!newPlaying && playing && SystemClock.uptimeMillis() - focusPauseAt > 2500) resumeOnFocusGain = false
+        if (newPlaying) resumeOnFocusGain = false
         playing = newPlaying
         if (playing) { requestFocus(); acquireWake(); registerNoisy() } else { releaseWake() }
         publish()
