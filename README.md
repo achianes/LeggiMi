@@ -63,6 +63,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 ### Reading
 - **Many formats**: PDF, EPUB, DOCX (Word), RTF, TXT, Markdown and other plain-text files. EPUB books keep their chapters (from the table of contents) and their headings.
 - **Web pages**: share a link from the browser and LeggiMi reads the article: menus, banners, footers and sidebars are dropped, headings and paragraphs are kept. The page is loaded once, on the phone.
+- **Same position on every device**: with a cloud account, the reading position of every document is kept in a small file (LeggiMi/leggimi-progress.json) in your cloud. Open the same book on another phone and LeggiMi offers to continue from where the other one got to. Switch it off in Settings › Cloud drives.
 - **Keep it in your cloud**: the first time a PDF, EPUB or Word file is opened, LeggiMi offers to upload a copy to the LeggiMi folder of your cloud, so your other phones and tablets find it too (the file stays on the phone). Audiobooks get the same offer after they are saved.
 - **Reads like a book**: sentences of the same paragraph flow together as one text, with space only between real paragraphs. The sentence being spoken is highlighted inside its paragraph (headings, list items and one-sentence paragraphs become a yellow sticker) and the view follows along. Tap any sentence to read from there.
 - **Instant jumps**: picking a chapter, or reopening a document from the Library, lands straight on the right place, even at the end of a long book, instead of scrolling through all the text in between. Scrolling back up brings the earlier text in seamlessly.
@@ -283,6 +284,7 @@ src/scan/ScanStudio.tsx               # scanner workspace: pages, crop editor, f
 src/scan/store.ts                     # scanned documents, OCR, bridge to the native scanner
 src/audio/transcribe.ts               # speech models, audio decoding, whisper transcription
 src/cloud/cloud.ts, CloudSheet.tsx    # cloud providers, accounts, upload sheet
+src/cloud/sync.ts                     # reading positions shared between devices
 src/speech/piper.ts                   # natural voices: catalogue, download/unpack, speak, audiobook
 src/docs/epub.ts                      # EPUB: spine, table of contents, XHTML -> Markdown
 src/docs/webpage.ts                   # shared links: in-WebView article extraction

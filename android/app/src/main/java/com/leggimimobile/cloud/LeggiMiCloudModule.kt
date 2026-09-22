@@ -607,6 +607,138 @@ class LeggiMiCloudModule(private val ctx: ReactApplicationContext) :
         promise.resolve(true)
     }
 
+    // ================================================== small sync files
+    // A text file in the LeggiMi folder, read and overwritten as a whole: the
+    // reading positions shared between the user's devices live there.
+
+    private fun gFind(token: String, folder: String, name: String): String? {
+        val q = "name='${name.replace("'", "\\'")}' and '$folder' in parents and trashed=false"
+        val r = http.newCall(
+            Request.Builder()
+                .url("https://www.googleapis.com/drive/v3/files?fields=files(id)&spaces=drive&q=" + URLEncoder.encode(q, "UTF-8"))
+                .header("Authorization", "Bearer $token").build()
+        ).execute()
+        if (!r.isSuccessful) fail(r, "Google Drive")
+        val files = JSONObject(r.bodyText()).optJSONArray("files")
+        r.close()
+        return if (files != null && files.length() > 0) files.getJSONObject(0).getString("id") else null
+    }
+
+    private fun gReadText(token: String, name: String): String? {
+        val id = gFind(token, gFolder(token), name) ?: return null
+        val r = http.newCall(
+            Request.Builder().url("https://www.googleapis.com/drive/v3/files/$id?alt=media")
+                .header("Authorization", "Bearer $token").build()
+        ).execute()
+        if (r.code == 404) { r.close(); return null }
+        if (!r.isSuccessful) fail(r, "Google Drive")
+        val t = r.bodyText()
+        r.close()
+        return t
+    }
+
+    private fun gWriteText(token: String, name: String, content: String) {
+        val folder = gFolder(token)
+        val existing = gFind(token, folder, name)
+        val body = content.toRequestBody("application/json; charset=utf-8".toMediaType())
+        val req = if (existing != null) {
+            Request.Builder().url("https://www.googleapis.com/upload/drive/v3/files/$existing?uploadType=media")
+                .header("Authorization", "Bearer $token").patch(body).build()
+        } else {
+            val boundary = "leggimi" + UUID.randomUUID().toString().replace("-", "")
+            val meta = JSONObject().put("name", name).put("parents", org.json.JSONArray().put(folder)).toString()
+            val nl = "" + 13.toChar() + 10.toChar()
+            val multipart = ("--$boundary${nl}Content-Type: application/json; charset=UTF-8$nl$nl$meta$nl" +
+                "--$boundary${nl}Content-Type: application/json; charset=UTF-8$nl$nl$content$nl--$boundary--$nl")
+            Request.Builder().url("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id")
+                .header("Authorization", "Bearer $token")
+                .post(multipart.toRequestBody("multipart/related; boundary=$boundary".toMediaType())).build()
+        }
+        val r = http.newCall(req).execute()
+        if (!r.isSuccessful) fail(r, "Google Drive")
+        r.close()
+    }
+
+    private fun davReadText(sec: JSONObject, name: String): String? {
+        val auth = Credentials.basic(sec.getString("user"), sec.getString("pass"), Charsets.UTF_8)
+        val url = davBase(sec.getString("url")) + enc(FOLDER) + "/" + enc(name)
+        val r = http.newCall(Request.Builder().url(url).header("Authorization", auth).get().build()).execute()
+        if (r.code == 404) { r.close(); return null }
+        if (!r.isSuccessful) fail(r, "Cloud")
+        val t = r.bodyText()
+        r.close()
+        return t
+    }
+
+    private fun davWriteText(sec: JSONObject, name: String, content: String) {
+        val base = davBase(sec.getString("url"))
+        val auth = Credentials.basic(sec.getString("user"), sec.getString("pass"), Charsets.UTF_8)
+        davEnsureFolder(base, auth)
+        val r = http.newCall(
+            Request.Builder().url(base + enc(FOLDER) + "/" + enc(name)).header("Authorization", auth)
+                .put(content.toRequestBody("application/json; charset=utf-8".toMediaType())).build()
+        ).execute()
+        if (r.code !in 200..299) fail(r, "Cloud")
+        r.bodyText()
+        r.close()
+    }
+
+    private fun dbxReadText(sec: JSONObject, name: String): String? {
+        val token = dbxAccess(sec)
+        val r = http.newCall(
+            Request.Builder().url("https://content.dropboxapi.com/2/files/download")
+                .header("Authorization", "Bearer $token")
+                .header("Dropbox-API-Arg", asciiJson(JSONObject().put("path", "/$FOLDER/$name").toString()))
+                .post(ByteArray(0).toRequestBody(null)).build()
+        ).execute()
+        if (r.code == 409) { r.close(); return null }
+        if (!r.isSuccessful) fail(r, "Dropbox")
+        val t = r.bodyText()
+        r.close()
+        return t
+    }
+
+    private fun dbxWriteText(sec: JSONObject, name: String, content: String) {
+        val token = dbxAccess(sec)
+        dbxFolder(token)
+        val arg = asciiJson(JSONObject().put("path", "/$FOLDER/$name").put("mode", "overwrite").put("mute", true).toString())
+        val r = http.newCall(
+            Request.Builder().url("https://content.dropboxapi.com/2/files/upload")
+                .header("Authorization", "Bearer $token").header("Dropbox-API-Arg", arg)
+                .post(content.toByteArray(Charsets.UTF_8).toRequestBody("application/octet-stream".toMediaType())).build()
+        ).execute()
+        if (!r.isSuccessful) fail(r, "Dropbox")
+        r.close()
+    }
+
+    /** Text of LeggiMi/<name>, or null when there is no such file yet. */
+    @ReactMethod
+    fun readText(id: String, name: String, promise: Promise) {
+        val sec = try { secret(id) } catch (e: Exception) { promise.reject("E_CLOUD", e.message); return }
+        when (sec.getString("type")) {
+            "gdrive" -> googleToken(false) { token, err ->
+                if (token == null) promise.reject("E_CLOUD", err ?: "Google sign-in needed")
+                else bg(promise) { gReadText(token, name) }
+            }
+            "dropbox" -> bg(promise) { dbxReadText(sec, name) }
+            else -> bg(promise) { davReadText(sec, name) }
+        }
+    }
+
+    /** Writes (or overwrites) LeggiMi/<name>. */
+    @ReactMethod
+    fun writeText(id: String, name: String, content: String, promise: Promise) {
+        val sec = try { secret(id) } catch (e: Exception) { promise.reject("E_CLOUD", e.message); return }
+        when (sec.getString("type")) {
+            "gdrive" -> googleToken(false) { token, err ->
+                if (token == null) promise.reject("E_CLOUD", err ?: "Google sign-in needed")
+                else bg(promise) { gWriteText(token, name, content); true }
+            }
+            "dropbox" -> bg(promise) { dbxWriteText(sec, name, content); true }
+            else -> bg(promise) { davWriteText(sec, name, content); true }
+        }
+    }
+
     companion object {
         const val FOLDER = "LeggiMi"
         private const val REQ_GOOGLE = 5123

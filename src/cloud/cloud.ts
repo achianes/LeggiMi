@@ -179,6 +179,9 @@ export const cloudNative = {
   upload: (id: string, src: string, name: string, mime: string): Promise<SpaceResult & { path: string; bytes: number }> =>
     withTimeout(N.upload(id, src, name, mime), 10 * 60_000, "Upload"),
   remove: (id: string): Promise<boolean> => N.remove(id),
+  /** a small text file in the LeggiMi folder (null when missing) */
+  readText: (id: string, name: string): Promise<string | null> => withTimeout(N.readText(id, name), 20_000, "Cloud"),
+  writeText: (id: string, name: string, content: string): Promise<boolean> => withTimeout(N.writeText(id, name, content), 30_000, "Cloud"),
   cancel: (): Promise<boolean> => (N?.cancel ? N.cancel() : Promise.resolve(true)),
 };
 

@@ -39,6 +39,7 @@ import {
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
 import { extractEpub } from "./src/docs/epub";
+import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
 import {
   PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice,
@@ -593,8 +594,16 @@ async function loadProgress(fid: string) {
   const n = Number(saved);
   return Number.isFinite(n) ? n : 0;
 }
+// when the position of a document last changed on this phone (for the cloud sync)
+async function loadProgressAt(fid: string) {
+  const n = Number(await AsyncStorage.getItem(`progressAt:${fid}`).catch(() => null));
+  return Number.isFinite(n) ? n : 0;
+}
+let onProgressSaved: (() => void) | null = null;
 async function saveProgress(fid: string, idx: number) {
   await AsyncStorage.setItem(`progress:${fid}`, String(idx));
+  AsyncStorage.setItem(`progressAt:${fid}`, String(Date.now())).catch(() => {});
+  onProgressSaved?.();
 }
 
 // ---- Library (history) ------------------------------------------------------
@@ -1188,6 +1197,75 @@ function AppInner() {
     setPiperReady(out);
   }, []);
   useEffect(() => { refreshPiperReady(); }, [refreshPiperReady]);
+
+  // Reading position shared between devices through the personal cloud
+  const [syncOn, setSyncOnState] = useState(true);
+  const syncOnRef = useRef(true);
+  useEffect(() => { isSyncOn().then((v) => { setSyncOnState(v); syncOnRef.current = v; }); }, []);
+  const toggleSync = (v: boolean) => { setSyncOnState(v); syncOnRef.current = v; setSyncOn(v).catch(() => {}); if (v) pushSyncSoon(500); };
+  const syncTimerRef = useRef<any>(null);
+  const syncBusyRef = useRef(false);
+  const deviceName = String((Platform as any).constants?.Model ?? (Platform as any).constants?.Brand ?? "this phone");
+  const localProgressSnapshot = async (): Promise<RemoteProgress> => {
+    const docs: RemoteProgress = {};
+    for (const e of libraryRef.current) {
+      if (!e.total) continue;
+      const at = (await loadProgressAt(e.id)) || e.lastOpenedAt || 0;
+      docs[e.id] = { name: e.name, index: e.index, total: e.total, at };
+    }
+    const fid = fileIdRef.current;
+    if (fid && segmentsRef.current.length) {
+      const at = (await loadProgressAt(fid)) || Date.now();
+      docs[fid] = { name: currentMetaRef.current?.name ?? fid, index: currentIdxRef.current, total: segmentsRef.current.length, at };
+    }
+    return docs;
+  };
+  const pushSyncNow = async () => {
+    if (!syncOnRef.current || syncBusyRef.current) return;
+    const acc = await syncAccountId();
+    if (!acc) return;
+    syncBusyRef.current = true;
+    try {
+      const merged = await pushProgress(acc, await localProgressSnapshot(), deviceName);
+      console.log("[sync] pushed", Object.keys(merged).length, "documents");
+    } catch (e: any) { console.log("[sync] push failed", String(e?.message ?? e)); }
+    finally { syncBusyRef.current = false; }
+  };
+  const pushSyncSoon = (ms = 20000) => {
+    clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(pushSyncNow, ms);
+  };
+  useEffect(() => {
+    onProgressSaved = () => pushSyncSoon();
+    const sub = AppState.addEventListener("change", (st) => { if (st !== "active") pushSyncSoon(800); });
+    return () => { onProgressSaved = null; sub.remove(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // A document just opened: if another device got further, offer to continue from there
+  const checkRemotePosition = async (fid: string, total: number) => {
+    if (!syncOnRef.current) return;
+    const acc = await syncAccountId();
+    if (!acc) return;
+    let remote: RemoteProgress;
+    try { remote = await pullProgress(acc); } catch (e: any) { console.log("[sync] pull failed", String(e?.message ?? e)); return; }
+    const r = remote[fid];
+    console.log("[sync] pulled", Object.keys(remote).length, "documents; this one:", r ? `${r.index + 1}/${r.total} on ${r.device}` : "none");
+    if (!r || fileIdRef.current !== fid) return;
+    const localAt = await loadProgressAt(fid);
+    const here = currentIdxRef.current;
+    if (r.at <= localAt || r.index <= here || r.index >= total) return;
+    const pct = Math.round(((r.index + 1) / total) * 100);
+    const k = await askChoice(
+      "PICK UP WHERE YOU LEFT?",
+      `On ${r.device || "another device"} you got to block ${r.index + 1} of ${total} (${pct}%). This phone is at block ${here + 1}.`,
+      "☁️",
+      [{ key: "go", icon: "⏩", label: "Continue from there", color: GRAPE }]
+    );
+    if (k !== "go" || fileIdRef.current !== fid) return;
+    setCurrentIdx(r.index);
+    await saveProgress(fid, r.index);
+    if (isReadingRef.current) hardStop().then(() => speakFrom(r.index));
+  };
 
   // long local jobs (model download, transcription) shown in the loading card
   const [task, setTask] = useState<{ title: string; sub?: string; progress?: number; cancel?: () => void } | null>(null);
@@ -1904,6 +1982,8 @@ function AppInner() {
     const savedIdx = await loadProgress(fid);
     const clamped = Math.max(0, Math.min(savedIdx, Math.max(0, segs.length - 1)));
     setCurrentIdx(clamped);
+    currentIdxRef.current = clamped;
+    setTimeout(() => checkRemotePosition(fid, segs.length), 600);
 
     // remember it in the Library, with the clean text cached for instant reopening
     const meta = currentMetaRef.current;
@@ -3209,6 +3289,12 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 </View>
                 <Text style={[s.rowSelectChevron, { color: INK }]}>›</Text>
               </ComicBox>
+              <Text style={s.sheetLabel}>Reading position on all your devices</Text>
+              <View style={s.chipRow}>
+                <ComicChip text="On" selected={syncOn} onPress={() => toggleSync(true)} palette={palette} color={GRAPE} />
+                <ComicChip text="Off" selected={!syncOn} onPress={() => toggleSync(false)} palette={palette} color={GRAPE} />
+              </View>
+              <Text style={[s.voiceHint, { marginTop: 6 }]}>Kept in a small file in the LeggiMi folder of your cloud. When you open a document that another device got further into, LeggiMi offers to continue from there.</Text>
 
               <Text style={s.sheetLabel}>Theme</Text>
               <View style={s.chipRow}>
