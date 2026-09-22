@@ -38,6 +38,8 @@ import {
 } from "./src/comic";
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
+import { extractEpub } from "./src/docs/epub";
+import { sharedLink, READER_JS } from "./src/docs/webpage";
 import {
   PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice,
   downloadPiperVoice, cancelPiperDownload, deletePiperVoice, loadPiperVoice, piper,
@@ -49,7 +51,7 @@ import {
   transcribeAudio, fmtDuration, cancelModelDownload,
 } from "./src/audio/transcribe";
 
-type DocKind = "pdf" | "docx" | "txt" | "md" | "rtf" | "image" | "text" | "print" | "scan" | "audio" | "other";
+type DocKind = "pdf" | "docx" | "epub" | "txt" | "md" | "rtf" | "image" | "text" | "web" | "print" | "scan" | "audio" | "other";
 type DocSource = "picker" | "share" | "print" | "scan";
 type Picked = { name: string; uri: string; type?: string | null; kind?: DocKind; ocr?: boolean };
 /** One row of the Library (history): what was opened, how far you got. */
@@ -612,6 +614,7 @@ function kindOf(name: string, mime: string | null | undefined, source: DocSource
   const m = (mime ?? "").toLowerCase();
   if (ext === "pdf" || m === "application/pdf") return "pdf";
   if (ext === "docx" || ext === "doc" || m.includes("wordprocessingml")) return "docx";
+  if (ext === "epub" || m.includes("epub")) return "epub";
   if (ext === "md" || ext === "markdown" || m.includes("markdown")) return "md";
   if (ext === "rtf" || m.includes("rtf")) return "rtf";
   if (IMAGE_EXTS.includes(ext) || m.startsWith("image/")) return "image";
@@ -623,6 +626,8 @@ function kindEmoji(k: DocKind) {
   switch (k) {
     case "pdf": return "📕";
     case "docx": return "📘";
+    case "epub": return "📗";
+    case "web": return "🌐";
     case "md": return "📝";
     case "rtf": return "📄";
     case "image": return "🖼️";
@@ -638,6 +643,8 @@ function kindColor(k: DocKind) {
   switch (k) {
     case "pdf": return CORAL;
     case "docx": return SKY;
+    case "epub": return MINT;
+    case "web": return AQUA;
     case "md": return TANGERINE;
     case "rtf": return GRAPE;
     case "image": return BUBBLEGUM;
@@ -653,6 +660,7 @@ function kindLabel(k: DocKind) {
     case "docx": return "DOC";
     case "image": return "IMG";
     case "text": return "TXT";
+    case "web": return "WEB";
     case "print": return "PRNT";
     case "scan": return "SCAN";
     case "audio": return "AUDIO";
@@ -2513,6 +2521,25 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
   };
 
+  // A document opened from a file (EPUB, PDF, DOCX): once, offer to keep a
+  // copy in the personal cloud so the other phones find it too.
+  const lastFileRef = useRef<{ fid: string; path: string; name: string; mime: string } | null>(null);
+  const offerCloudCopy = async (fid: string) => {
+    const f = lastFileRef.current;
+    if (!f || f.fid !== fid) return;
+    const key = `cloudOffered:${fid}`;
+    try { if (await AsyncStorage.getItem(key)) return; } catch {}
+    AsyncStorage.setItem(key, "1").catch(() => {});
+    if (!(await RNFS.exists(f.path).catch(() => false))) return;
+    const k = await askChoice(
+      "KEEP IT IN YOUR CLOUD?",
+      `“${f.name}” can go to the LeggiMi folder of your cloud, so your other phones and tablets find it too. The file stays on this phone as well.`,
+      "☁️",
+      [{ key: "cloud", icon: "☁️", label: "Upload a copy", sub: "Google Drive, into the LeggiMi folder", color: GRAPE }]
+    );
+    if (k === "cloud") setCloudOpen({ file: { path: f.path, name: f.name, mime: f.mime } });
+  };
+
   const openFileFromUri = async (
     name: string,
     uri: string,
@@ -2570,11 +2597,29 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         return;
       }
 
+      // documents worth keeping: remember the file for the cloud offer
+      const keepable = ext === "epub" || ext === "pdf" || ext === "docx" || (mime ?? "").includes("epub") || mime === "application/pdf" || (mime ?? "").includes("wordprocessingml");
+      lastFileRef.current = keepable && !fromPrint
+        ? { fid, path: localPath, name, mime: mime || (ext === "epub" ? "application/epub+zip" : ext === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document") }
+        : null;
+
       if (ext === "docx" || (mime ?? "").includes("wordprocessingml")) {
         const docText = await extractDocxText(localPath);
         const start = await applyTextForCurrentFile(fid, docText, { extracted: true });
         setIsExtracting(false);
         if (autoStart) setTimeout(() => speakFrom(start), 200);
+        offerCloudCopy(fid);
+        return;
+      }
+
+      if (ext === "epub" || (mime ?? "").includes("epub")) {
+        const book = await extractEpub(localPath);
+        if (book.title && currentMetaRef.current) currentMetaRef.current.name = book.title;
+        if (book.title) setPicked((p) => (p ? { ...p, name: book.title } : p));
+        const start = await applyTextForCurrentFile(fid, book.text, { markdown: true });
+        setIsExtracting(false);
+        if (autoStart) setTimeout(() => speakFrom(start), 200);
+        offerCloudCopy(fid);
         return;
       }
 
@@ -2612,16 +2657,46 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
   };
 
+  // A link: the page is loaded in a hidden WebView, READER_JS keeps the article
+  const [linkFetch, setLinkFetch] = useState<{ url: string; autoStart: boolean } | null>(null);
+  const linkTimerRef = useRef<any>(null);
+  const openSharedLink = async (url: string, autoStart: boolean) => {
+    await hardStop();
+    setIsExtracting(true);
+    setTask({ title: "READING THE PAGE", sub: url.replace(/^https?:\/\//, "").slice(0, 60), cancel: () => finishLink(null) });
+    setLinkFetch({ url, autoStart });
+    clearTimeout(linkTimerRef.current);
+    linkTimerRef.current = setTimeout(() => finishLink(null, "The page took too long to load."), 30000);
+  };
+  const finishLink = (article: { title: string; text: string; url: string } | null, error?: string) => {
+    clearTimeout(linkTimerRef.current);
+    const req = linkFetch ?? linkFetchRef.current;
+    setLinkFetch(null);
+    linkFetchRef.current = null;
+    setTask(null);
+    if (!article) {
+      setIsExtracting(false);
+      if (error) Alert.alert("Web page", error);
+      return;
+    }
+    let host = "";
+    try { host = new URL(article.url).hostname.replace(/^www\./, ""); } catch {}
+    const title = article.title || host || "Web page";
+    openSharedText(title, article.text, req?.autoStart ?? true, "web", article.url);
+  };
+  const linkFetchRef = useRef<{ url: string; autoStart: boolean } | null>(null);
+  useEffect(() => { linkFetchRef.current = linkFetch; }, [linkFetch]);
+
   // Text that arrives without a file (share sheet "text" payload).
-  const openSharedText = async (title: string, text: string, autoStart: boolean) => {
+  const openSharedText = async (title: string, text: string, autoStart: boolean, kind: "text" | "web" = "text", uri = "") => {
     setIsExtracting(true);
     await hardStop();
     setSegments([]);
     segmentsRef.current = [];
     setChapters([]);
     setRawText("");
-    setPicked({ name: title, uri: "", type: "text/plain", kind: "text" });
-    currentMetaRef.current = { name: title, kind: "text", source: "share", ocr: false };
+    setPicked({ name: title, uri, type: kind === "web" ? "text/html" : "text/plain", kind });
+    currentMetaRef.current = { name: title, kind, source: "share", ocr: false };
     // stable id from the content so progress is kept if the same text comes back
     let h = 0;
     for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
@@ -2692,11 +2767,12 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             // no file behind it, the text itself is the document.
             const sharedText = String(f?.text || "").trim();
             const link = String(f?.weblink || "").trim();
-            if (sharedText) {
+            const url = link || (sharedText ? sharedLink(sharedText) : null);
+            if (url) {
+              await openSharedLink(url, true);
+            } else if (sharedText) {
               const title = String(f?.subject || "").trim() || "Shared text";
               await openSharedText(title, sharedText, true);
-            } else if (link) {
-              Alert.alert("Sharing", "Links are not fetched yet. Share the page text or a file instead.");
             }
             return;
           }
@@ -2957,7 +3033,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               <PosterTitle text="LISTEN TO YOUR" palette={palette} size={26} />
               <PosterTitle text="DOCUMENTS" palette={palette} size={26} />
               <Text style={s.emptyText}>
-                Open a PDF, Word, Markdown, TXT or RTF file, scan paper pages, or share a photo or a recording from any other app — and I will read it out loud.
+                Open a PDF, EPUB, Word, Markdown, TXT or RTF file, scan paper pages, or share a link, a photo or a recording from any other app — and I will read it out loud.
               </Text>
               <View style={s.kindRow}>
                 {[
@@ -3506,6 +3582,30 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         onClose={() => setCloudOpen(null)}
       />
 
+      {/* Web link shared to LeggiMi: loaded here, hidden, and reduced to its article */}
+      {linkFetch ? (
+          <View style={{ width: 1, height: 1, opacity: 0, position: "absolute" }} pointerEvents="none">
+            <WebView
+              source={{ uri: linkFetch.url }}
+              javaScriptEnabled
+              domStorageEnabled
+              injectedJavaScript={READER_JS}
+              userAgent="Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+              onMessage={(e) => {
+                let msg: any;
+                try { msg = JSON.parse(e.nativeEvent.data); } catch { return; }
+                if (msg?.type === "article" && String(msg.text || "").trim().length > 40) {
+                  finishLink({ title: String(msg.title || ""), text: String(msg.text), url: String(msg.url || linkFetch.url) });
+                } else if (msg?.type === "article" || msg?.type === "article-error") {
+                  finishLink(null, "No readable text was found on this page.");
+                }
+              }}
+              onError={() => finishLink(null, "The page could not be loaded. Check the connection and the address.")}
+              onHttpError={(e) => { if (e.nativeEvent.statusCode >= 400) finishLink(null, `The page answered HTTP ${e.nativeEvent.statusCode}.`); }}
+            />
+          </View>
+        ) : null}
+
       {/* PDF extractor offline (hidden). Also renders pages for OCR on request. */}
       {pdfBase64 && (
         <WebView
@@ -3537,6 +3637,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 pendingAutoStartRef.current = false;
                 setTimeout(() => speakFrom(start), 250);
               }
+              if (fileIdRef.current) offerCloudCopy(fileIdRef.current);
             };
 
             // ---- one OCR page rendered by pdf.js

@@ -2,7 +2,7 @@
 
 # LeggiMi
 
-**Listen to your documents.** LeggiMi is an Android app that turns almost anything into text and reads it aloud: PDFs, Word files, Markdown, plain text, **photos of paper pages**, **scanned documents**, **voice recordings**, and whatever other apps can **share** or **print**. It highlights each block as it speaks, like karaoke for documents, and keeps everything in a Library so you can pick up where you stopped.
+**Listen to your documents.** LeggiMi is an Android app that turns almost anything into text and reads it aloud: PDFs, EPUB books, Word files, Markdown, plain text, **web pages**, **photos of paper pages**, **scanned documents**, **voice recordings**, and whatever other apps can **share** or **print**. It highlights each block as it speaks, like karaoke for documents, and keeps everything in a Library so you can pick up where you stopped.
 
 Recognition happens **on the phone**: OCR, speech-to-text, PDF extraction and page processing run locally. Nothing is uploaded unless you choose to export to your own cloud.
 
@@ -61,7 +61,9 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 ## Features
 
 ### Reading
-- **Many formats**: PDF, DOCX (Word), RTF, TXT, Markdown and other plain-text files.
+- **Many formats**: PDF, EPUB, DOCX (Word), RTF, TXT, Markdown and other plain-text files. EPUB books keep their chapters (from the table of contents) and their headings.
+- **Web pages**: share a link from the browser and LeggiMi reads the article: menus, banners, footers and sidebars are dropped, headings and paragraphs are kept. The page is loaded once, on the phone.
+- **Keep it in your cloud**: the first time a PDF, EPUB or Word file is opened, LeggiMi offers to upload a copy to the LeggiMi folder of your cloud, so your other phones and tablets find it too (the file stays on the phone). Audiobooks get the same offer after they are saved.
 - **Reads like a book**: sentences of the same paragraph flow together as one text, with space only between real paragraphs. The sentence being spoken is highlighted inside its paragraph (headings, list items and one-sentence paragraphs become a yellow sticker) and the view follows along. Tap any sentence to read from there.
 - **Instant jumps**: picking a chapter, or reopening a document from the Library, lands straight on the right place, even at the end of a long book, instead of scrolling through all the text in between. Scrolling back up brings the earlier text in seamlessly.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
@@ -77,7 +79,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 
 ### Getting documents in
 - **Open** any file with the 📂 button.
-- **Share** a file, several pictures, or just selected text from any app.
+- **Share** a file, several pictures, a link, or just selected text from any app.
 - **Print** from apps without a Share button: pick the virtual printer **“LeggiMi (read aloud)”**.
 - **Scan** paper pages with the camera (📷).
 - **Record** elsewhere and share the audio file: LeggiMi transcribes it.
@@ -282,6 +284,8 @@ src/scan/store.ts                     # scanned documents, OCR, bridge to the na
 src/audio/transcribe.ts               # speech models, audio decoding, whisper transcription
 src/cloud/cloud.ts, CloudSheet.tsx    # cloud providers, accounts, upload sheet
 src/speech/piper.ts                   # natural voices: catalogue, download/unpack, speak, audiobook
+src/docs/epub.ts                      # EPUB: spine, table of contents, XHTML -> Markdown
+src/docs/webpage.ts                   # shared links: in-WebView article extraction
 src/playback/playback.ts              # media card / background reading bridge
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
@@ -325,7 +329,7 @@ If this saved you an argument about who forgot the water bill:
 - OCR quality depends on the photo: good light and a flat sheet help. Pages with the B&amp;W filter are recognised from a grey version automatically.
 - The camera scanner needs Google Play services. Without them, use **Photos** in the scan studio: pictures are imported, auto-cropped and can be edited the same way.
 - Transcription speed depends on the phone and the model. On older phones pick “Fast”; switch to “Accurate” when the text matters more than the wait.
-- Links shared to LeggiMi are not fetched: share the page text or a file instead.
+- Pages behind a login or a paywall cannot be read from a link: share the page text instead.
 - Natural voices are Italian and English for now; more Piper languages can be added to the catalogue in `src/speech/piper.ts`. A natural voice takes a moment to load the first time it speaks after the app starts.
 - The APK ships 64-bit libraries only (arm64-v8a and x86_64).
 - Audiobooks are one .m4a per document, without chapter markers.
