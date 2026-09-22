@@ -135,9 +135,16 @@ export async function extractEpub(localPath: string): Promise<EpubBook> {
     if (!md) continue;
     const ttl = toc.get(path);
     if (ttl) {
-      const firstLine = md.split("\n")[0];
-      const headed = /^#{1,6}\s/.test(firstLine) && norm(firstLine.replace(/^#+\s*/, "")) === norm(ttl);
-      if (!headed) md = `## ${ttl}\n\n${md}`;
+      const lines = md.split("\n");
+      const first = lines[0];
+      const headText = /^#{1,6}\s/.test(first) ? first.replace(/^#+\s*/, "").trim() : null;
+      const nt = norm(ttl);
+      if (headText !== null && (norm(headText) === nt || nt.startsWith(norm(headText)) || headText.length <= 6)) {
+        // the file opens with the chapter number or a shorter form of the title:
+        // the table of contents has the full one
+        lines[0] = `## ${ttl}`;
+        md = lines.join("\n");
+      } else md = `## ${ttl}\n\n${md}`;
       chapters++;
     } else if (/^#{1,6}\s/.test(md.split("\n")[0])) chapters++;
     parts.push(md);
