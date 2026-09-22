@@ -43,6 +43,14 @@ class LeggiMiPlaybackModule(private val ctx: ReactApplicationContext) : ReactCon
         }
     }
 
+    /** the action Android Auto (or a headset) sent while the app was closed, if any */
+    @ReactMethod
+    fun pending(promise: Promise) {
+        val a = LeggiMiPlaybackService.pendingAction
+        LeggiMiPlaybackService.pendingAction = null
+        promise.resolve(a)
+    }
+
     @ReactMethod
     fun stop(promise: Promise) {
         try {

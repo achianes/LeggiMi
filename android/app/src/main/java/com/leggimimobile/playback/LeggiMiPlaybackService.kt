@@ -4,7 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -14,15 +13,21 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.support.v4.media.MediaBrowserCompat
+import android.support.v4.media.MediaDescriptionCompat
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.media.MediaBrowserServiceCompat
 import androidx.media.session.MediaButtonReceiver
+import org.json.JSONArray
+import java.io.File
 import com.leggimimobile.MainActivity
 import com.leggimimobile.R
 
@@ -33,7 +38,7 @@ import com.leggimimobile.R
  * wake lock. The reading itself stays in JS; this service only reports what the
  * user asked for (play, pause, next, previous, stop) through [listener].
  */
-class LeggiMiPlaybackService : Service() {
+class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
 
     companion object {
         private const val TAG = "LeggiMiPlayback"
@@ -49,9 +54,55 @@ class LeggiMiPlaybackService : Service() {
         const val EXTRA_SUBTITLE = "subtitle"
         const val EXTRA_PLAYING = "playing"
 
-        /** set by the React module: receives "play" | "pause" | "next" | "prev" | "stop" */
+        /** set by the React module: receives "play" | "pause" | "next" | "prev" | "stop" | "open:<library id>" */
         @Volatile var listener: ((String) -> Unit)? = null
         @Volatile var instance: LeggiMiPlaybackService? = null
+        /** an action that arrived while the app was not running (Android Auto): consumed by JS at start */
+        @Volatile var pendingAction: String? = null
+        const val ROOT_ID = "leggimi_root"
+        const val AUTO_LIBRARY_FILE = "auto_library.json"
+    }
+
+    /** hands an action to JS, or starts the app with it when JS is not running */
+    private fun dispatch(action: String) {
+        val l = listener
+        if (l != null) { l(action); return }
+        pendingAction = action
+        try {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        } catch (e: Exception) { Log.w(TAG, "cannot start the app", e) }
+    }
+
+    // ------------------------------------------------ Android Auto: the browse tree
+
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot = BrowserRoot(ROOT_ID, null)
+
+    override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
+        val items = mutableListOf<MediaBrowserCompat.MediaItem>()
+        if (parentId == ROOT_ID) {
+            try {
+                val f = File(filesDir, AUTO_LIBRARY_FILE)
+                if (f.exists()) {
+                    val arr = JSONArray(f.readText())
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val id = o.optString("id")
+                        if (id.isEmpty()) continue
+                        val total = o.optInt("total", 0)
+                        val index = o.optInt("index", 0)
+                        val pct = if (total > 0) ((index + 1) * 100 / total) else 0
+                        val kind = o.optString("kind", "").uppercase()
+                        val desc = MediaDescriptionCompat.Builder()
+                            .setMediaId("doc:$id")
+                            .setTitle(o.optString("name"))
+                            .setSubtitle(if (total > 0) "$kind - $pct% - block ${index + 1} of $total" else kind)
+                            .build()
+                        items.add(MediaBrowserCompat.MediaItem(desc, MediaBrowserCompat.MediaItem.FLAG_PLAYABLE))
+                    }
+                }
+            } catch (e: Exception) { Log.w(TAG, "library for Auto", e) }
+        }
+        result.sendResult(items)
     }
 
     private lateinit var session: MediaSessionCompat
@@ -95,8 +146,6 @@ class LeggiMiPlaybackService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -104,24 +153,32 @@ class LeggiMiPlaybackService : Service() {
         createChannel()
         session = MediaSessionCompat(this, "LeggiMi").apply {
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() { listener?.invoke("play") }
-                override fun onPause() { listener?.invoke("pause") }
-                override fun onSkipToNext() { listener?.invoke("next") }
-                override fun onSkipToPrevious() { listener?.invoke("prev") }
-                override fun onStop() { listener?.invoke("stop") }
+                override fun onPlay() { dispatch("play") }
+                override fun onPause() { dispatch("pause") }
+                override fun onSkipToNext() { dispatch("next") }
+                override fun onSkipToPrevious() { dispatch("prev") }
+                override fun onStop() { dispatch("stop") }
+                override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
+                    val id = mediaId?.removePrefix("doc:") ?: return
+                    dispatch("open:$id")
+                }
+                override fun onPlayFromSearch(query: String?, extras: Bundle?) { dispatch("play") }
             })
             isActive = true
         }
+        sessionToken = session.sessionToken
+        // a paused card right away, so Android Auto has something to show
+        publish()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         MediaButtonReceiver.handleIntent(session, intent)
         when (intent?.action) {
-            ACTION_PLAY -> listener?.invoke("play")
-            ACTION_PAUSE -> listener?.invoke("pause")
-            ACTION_NEXT -> listener?.invoke("next")
-            ACTION_PREV -> listener?.invoke("prev")
-            ACTION_STOP -> listener?.invoke("stop")
+            ACTION_PLAY -> dispatch("play")
+            ACTION_PAUSE -> dispatch("pause")
+            ACTION_NEXT -> dispatch("next")
+            ACTION_PREV -> dispatch("prev")
+            ACTION_STOP -> dispatch("stop")
             ACTION_UPDATE -> {
                 applyState(
                     intent.getStringExtra(EXTRA_TITLE) ?: title,

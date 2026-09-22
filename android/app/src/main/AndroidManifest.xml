@@ -23,6 +23,7 @@
       android:networkSecurityConfig="@xml/network_security_config"
 	  android:hardwareAccelerated="true"
       android:supportsRtl="true">
+      <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc" />
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"
@@ -60,10 +61,14 @@
       <!-- Reading aloud in the background: media controls, headset buttons, audio focus -->
       <service
         android:name=".playback.LeggiMiPlaybackService"
-        android:exported="false"
+        android:exported="true"
         android:foregroundServiceType="mediaPlayback">
         <intent-filter>
           <action android:name="android.intent.action.MEDIA_BUTTON" />
+        </intent-filter>
+        <!-- Android Auto and other media browsers list the Library through this -->
+        <intent-filter>
+          <action android:name="android.media.browse.MediaBrowserService" />
         </intent-filter>
       </service>
 

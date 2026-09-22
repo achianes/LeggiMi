@@ -689,6 +689,12 @@ async function loadLibrary(): Promise<LibraryEntry[]> {
 }
 async function persistLibrary(list: LibraryEntry[]) {
   await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify(list.slice(0, LIBRARY_MAX)));
+  // a small copy for Android Auto, read by the native media service
+  const auto = list
+    .filter((e) => e.textPath && e.total > 0)
+    .slice(0, 50)
+    .map((e) => ({ id: e.id, name: e.name, kind: e.kind, index: e.index, total: e.total }));
+  RNFS.writeFile(`${RNFS.DocumentDirectoryPath}/${"auto_library.json"}`, JSON.stringify(auto), "utf8").catch(() => {});
 }
 function fmtDate(ts: number) {
   const d = new Date(ts);
@@ -1846,17 +1852,37 @@ function AppInner() {
   // buttons of the media card / headset / audio focus, always on the latest closures
   const actionsRef = useRef({ speakFrom, pause, skipSegment, hardStop });
   actionsRef.current = { speakFrom, pause, skipSegment, hardStop };
-  useEffect(() => {
-    return playback.onAction((a) => {
-      const act = actionsRef.current;
-      if (!segmentsRef.current.length) { playback.stop(); return; }
-      if (a === "play") { if (!isReadingRef.current) act.speakFrom(currentIdxRef.current); }
+  const openFromLibraryRef = useRef<((e: LibraryEntry, autoStart?: boolean) => Promise<void>) | null>(null);
+  const handlePlaybackAction = (a: string) => {
+    const act = actionsRef.current;
+    // Android Auto: a document picked from the car screen
+    if (a.startsWith("open:")) {
+      const e = libraryRef.current.find((x) => x.id === a.slice(5));
+      if (e) openFromLibraryRef.current?.(e, true);
+      return;
+    }
+    if (!segmentsRef.current.length) {
+      // nothing open yet (the car said Play): start the last document read
+      const last = libraryRef.current.find((x) => x.textPath && x.total > 0);
+      if (a === "play" && last) openFromLibraryRef.current?.(last, true);
+      else playback.stop();
+      return;
+    }
+    if (a === "play") { if (!isReadingRef.current) act.speakFrom(currentIdxRef.current); }
       else if (a === "pause") { if (isReadingRef.current) act.pause(); }
       else if (a === "next") act.skipSegment(1);
-      else if (a === "prev") act.skipSegment(-1);
-      else if (a === "stop") act.hardStop().then(() => playback.stop());
-    });
-  }, []);
+    else if (a === "prev") act.skipSegment(-1);
+    else if (a === "stop") act.hardStop().then(() => playback.stop());
+  };
+  useEffect(() => playback.onAction(handlePlaybackAction), []);
+  // an action that arrived while the app was closed (the car's Play, a picked document)
+  const pendingCheckedRef = useRef(false);
+  useEffect(() => {
+    if (pendingCheckedRef.current || !library.length) return;
+    pendingCheckedRef.current = true;
+    playback.pending().then((a) => { if (a) setTimeout(() => handlePlaybackAction(a), 400); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [library.length]);
 
   const skipToChapter = (ch: Chapter) => {
     setChaptersOpen(false);
@@ -2068,6 +2094,15 @@ function AppInner() {
     if (liveSpeakingRef.current) return;
     liveSpeakingRef.current = true;
     try {
+      const pk = isPiperVoice(voiceIdRef.current) ? piperKeyOf(voiceIdRef.current) : null;
+      if (pk) {
+        try { await loadPiperVoice(pk); }
+        catch (e: any) { Alert.alert("Natural voice", String(e?.message ?? e)); liveQueueRef.current = []; return; }
+      } else {
+        await ensureTtsReady(4000);
+        try { await Tts.setDefaultRate(rateRef.current, true); } catch {}
+        if (voiceIdRef.current) { try { await Tts.setDefaultVoice(voiceIdRef.current); } catch {} }
+      }
       while (liveQueueRef.current.length) {
         const text = liveQueueRef.current.shift()!;
         const token = (sessionRef.current += 1);
@@ -2338,7 +2373,7 @@ function AppInner() {
 
   // Reopen a document from the Library: the clean text is cached, so no
   // extraction (or OCR) is needed again.
-  const openFromLibrary = async (entry: LibraryEntry) => {
+  const openFromLibrary = async (entry: LibraryEntry, autoStart = false) => {
     setLibraryOpen(false);
     if (entry.scanId && !entry.textPath) {
       setScanOpen({ docId: entry.scanId, start: null });
@@ -2359,6 +2394,7 @@ function AppInner() {
       const start = await applyTextForCurrentFile(entry.id, text, { markdown: entry.markdown });
       setIsExtracting(false);
       setTimeout(() => scrollToIndexSafe(start, 0.32), 250);
+      if (autoStart) setTimeout(() => speakFrom(start), 300);
     } catch {
       setIsExtracting(false);
       setPicked(null);
@@ -2366,6 +2402,7 @@ function AppInner() {
       removeFromLibrary(entry);
     }
   };
+  openFromLibraryRef.current = openFromLibrary;
 
   const confirmAsync = (title: string, message: string, okText = "OK", cancelText = "Cancel") =>
     new Promise<boolean>((resolve) => {
