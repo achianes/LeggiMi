@@ -1743,27 +1743,33 @@ function AppInner() {
     notifyPlayback(false);
   };
 
-  const speakOne = async (text: string, idx: number, session: number): Promise<boolean | "skip"> => {
+  // Speaks one block. Returns the utterance id, so waitTtsDone can ignore the
+  // finish/cancel of an earlier utterance that arrives late (e.g. the block that
+  // was paused mid-way), "skip" for an empty block, null when the engine refused.
+  const speakOne = async (text: string, idx: number, session: number): Promise<string | "skip" | null> => {
     const plain = mdToPlain(text);
     const a = sanitizeForTts(plain);
     if (!a) return "skip";
     if (isPiperVoice(voiceIdRef.current)) {
       // neural voice: completion arrives as a piper event (see waitTtsDone)
+      const id = `${session}:${idx}`;
       spokenRef.current = { idx, text: a };
-      try { await piper.speak(`${session}:${idx}`, a, rateRef.current); return true; } catch { return false; }
+      try { await piper.speak(id, a, rateRef.current); return id; } catch { return null; }
     }
     try {
       spokenRef.current = { idx, text: a };
-      await Tts.speak(a);
-      return true;
+      const uid = await Tts.speak(a);
+      return typeof uid === "string" ? uid : "tts";
     } catch {
       const b = sanitizeForTtsStrong(plain);
-      if (!b) return true;
-      try { spokenRef.current = { idx, text: b }; await Tts.speak(b); return true; } catch { return false; }
+      if (!b) return "skip";
+      try { spokenRef.current = { idx, text: b }; const uid = await Tts.speak(b); return typeof uid === "string" ? uid : "tts"; } catch { return null; }
     }
   };
 
-  const waitTtsDone = async (sessionToken: number, timeoutMs = 60000) => {
+  const waitTtsDone = async (sessionToken: number, timeoutMs = 60000, expectId: string | null = null) => {
+    // an event of another utterance (a paused one cancelled late) must not end this wait
+    const mine = (id: unknown) => !expectId || expectId === "tts" || !id || String(id) === expectId;
     return await new Promise<void>((resolve) => {
       let done = false;
       let subFinish: any = null;
@@ -1788,10 +1794,12 @@ function AppInner() {
         if (sessionRef.current !== sessionToken) cleanupAndResolve();
       }, 150);
 
-      subFinish = Tts.addEventListener("tts-finish", cleanupAndResolve);
-      subCancel = Tts.addEventListener("tts-cancel", cleanupAndResolve);
-      subError = Tts.addEventListener("tts-error", cleanupAndResolve);
-      const unsubPiper = piper.onDone((kind, _id, message) => {
+      const onTts = (e: any) => { if (mine(e?.utteranceId)) cleanupAndResolve(); };
+      subFinish = Tts.addEventListener("tts-finish", onTts);
+      subCancel = Tts.addEventListener("tts-cancel", onTts);
+      subError = Tts.addEventListener("tts-error", onTts);
+      const unsubPiper = piper.onDone((kind, id, message) => {
+        if (!mine(id)) return;
         if (kind === "error" && !ttsErrorShownRef.current) {
           ttsErrorShownRef.current = true;
           Alert.alert("Natural voice", message || "This sentence could not be synthesised.");
@@ -1879,7 +1887,7 @@ function AppInner() {
 
       const ok = await speakOne(segs[i], i, sessionToken);
       if (ok === "skip") continue;
-      if (!ok && !ttsErrorShownRef.current) {
+      if (ok === null && !ttsErrorShownRef.current) {
         ttsErrorShownRef.current = true;
         Alert.alert("Text to speech", "Some parts cannot be read by the voice. Lower the speed or pick another voice.");
       }
@@ -1888,7 +1896,7 @@ function AppInner() {
         const next = sanitizeForTts(mdToPlain(segs[i + 1]));
         if (next) piper.prepare(`${sessionToken}:${i + 1}`, next, rateRef.current);
       }
-      await waitTtsDone(sessionToken, 60000);
+      if (ok !== null) await waitTtsDone(sessionToken, 60000, ok);
       if (sessionRef.current === sessionToken) setSpokenWord(null);
     }
 
@@ -2201,8 +2209,8 @@ function AppInner() {
         liveSessionRef.current = token;
         await safeStop();
         const ok = await speakOne(text, -1, token);
-        if (ok === "skip" || !ok) continue;
-        await waitTtsDone(token, 60000);
+        if (ok === "skip" || ok === null) continue;
+        await waitTtsDone(token, 60000, ok);
       }
     } finally {
       liveSpeakingRef.current = false;

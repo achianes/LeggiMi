@@ -160,19 +160,24 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
-                // another player took over for good: stop here, no automatic resume
+                // another player took over for good: stop here, no automatic resume.
+                // Focus is gone: the next Play must ask for it again, or Android 12+
+                // keeps our audio faded out.
+                hasFocus = false
                 resumeOnFocusGain = false
-                if (playing) { focusPauseAt = SystemClock.uptimeMillis(); listener?.invoke("pause") }
+                if (playing) { focusPauseAt = SystemClock.uptimeMillis(); dispatch("pause") }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 // a call, a navigation prompt: pause and come back afterwards
-                if (playing) { resumeOnFocusGain = true; focusPauseAt = SystemClock.uptimeMillis(); listener?.invoke("pause") }
+                hasFocus = false
+                if (playing) { resumeOnFocusGain = true; focusPauseAt = SystemClock.uptimeMillis(); dispatch("pause") }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 // a notification sound: the system lowers our volume for a moment, keep reading
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                if (resumeOnFocusGain && !playing) { resumeOnFocusGain = false; listener?.invoke("play") }
+                hasFocus = true
+                if (resumeOnFocusGain && !playing) { resumeOnFocusGain = false; dispatch("play") }
             }
         }
     }
@@ -238,8 +243,12 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         if (!newPlaying && playing && SystemClock.uptimeMillis() - focusPauseAt > 2500) resumeOnFocusGain = false
         if (newPlaying) resumeOnFocusGain = false
         playing = newPlaying
-        if (playing) { requestFocus(); acquireWake(); registerNoisy() } else { releaseWake() }
+        // foreground first: Android 15 refuses audio focus to an app that is still in the background
         publish()
+        if (playing) {
+            acquireWake(); registerNoisy()
+            if (!requestFocus()) android.os.Handler(mainLooper).postDelayed({ if (playing) requestFocus() }, 400)
+        } else releaseWake()
     }
 
     private fun publish() {
@@ -328,8 +337,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         nm.createNotificationChannel(ch)
     }
 
-    private fun requestFocus() {
-        if (hasFocus) return
+    private fun requestFocus(): Boolean {
+        if (hasFocus) return true
         val res = if (Build.VERSION.SDK_INT >= 26) {
             val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
@@ -348,6 +357,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
             audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
         }
         hasFocus = res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (!hasFocus) Log.w(TAG, "audio focus not granted ($res)")
+        return hasFocus
     }
 
     private fun abandonFocus() {
