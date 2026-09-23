@@ -162,6 +162,11 @@ export const piper = {
     const s = DeviceEventEmitter.addListener("piper-progress", (e: any) => cb(String(e?.id ?? ""), Number(e?.location ?? -1), Number(e?.length ?? 0)));
     return () => s.remove();
   },
+  /** loudness (0..~0.5 RMS) of the voice while it plays, ~20 times a second */
+  onLevel(cb: (level: number) => void) {
+    const s = DeviceEventEmitter.addListener("piper-level", (v: number) => cb(Number(v) || 0));
+    return () => s.remove();
+  },
   onFileProgress(cb: (done: number, total: number) => void) {
     const s = DeviceEventEmitter.addListener("piper-file-progress", (e: any) => cb(Number(e?.done ?? 0), Number(e?.total ?? 0)));
     return () => s.remove();

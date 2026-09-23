@@ -63,15 +63,46 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         const val AUTO_LIBRARY_FILE = "auto_library.json"
     }
 
-    /** hands an action to JS, or starts the app with it when JS is not running */
+    /**
+     * Reads without the app when JS is not running (Android Auto with the app
+     * closed): the car reader speaks the cached sentences itself. Once the app
+     * reads again (applyState from JS with playing=true) it takes over.
+     */
+    private val car: CarReader by lazy {
+        CarReader(this) { r ->
+            if (!carOwner) return@CarReader
+            val sub = buildString {
+                if (r.chapter.isNotEmpty()) append(r.chapter).append(" · ")
+                if (r.total > 0) append(((r.index + 1) * 100 / r.total)).append("% · block ").append(r.index + 1).append("/").append(r.total)
+            }
+            applyState(if (r.docName.isNotEmpty()) r.docName else title, sub, r.playing)
+        }
+    }
+    @Volatile private var carOwner = false
+
+    /** hands an action to JS when it is running, otherwise to the car reader */
     private fun dispatch(action: String) {
         val l = listener
-        if (l != null) { l(action); return }
-        pendingAction = action
-        try {
-            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
-        } catch (e: Exception) { Log.w(TAG, "cannot start the app", e) }
+        if (l != null && !carOwner) { l(action); return }
+        when {
+            action == "play" -> { carOwner = true; car.play() }
+            action == "pause" -> if (carOwner) car.pause()
+            action == "next" -> if (carOwner) car.skip(1)
+            action == "prev" -> if (carOwner) car.skip(-1)
+            action == "stop" -> { if (carOwner) car.stop(); carOwner = false; applyState(title, subtitle, false) }
+            action.startsWith("open:") -> {
+                val id = action.removePrefix("open:")
+                if (car.hasCache(id)) { carOwner = true; car.play(id) }
+                else if (l != null) l(action)
+                else pendingAction = action
+            }
+        }
+        // JS not running and the car reader could not help: remember it for the app's next start
+        if (l == null && !carOwner) pendingAction = action
     }
+
+    /** the car reader's state, for the app when it comes back */
+    fun carState(): Triple<String?, Int, Boolean> = if (carOwner && car.active) Triple(car.docId, car.index, car.playing) else Triple(null, 0, false)
 
     // ------------------------------------------------ Android Auto: the browse tree
 
@@ -191,6 +222,12 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         // a button intent while foreground was requested: show the card at once (5 s rule)
         publish()
         return START_NOT_STICKY
+    }
+
+    /** called by JS: the app reads on its own now, the car reader steps back */
+    fun jsTakesOver(newTitle: String, newSubtitle: String, newPlaying: Boolean) {
+        if (carOwner && newPlaying) { Log.i(TAG, "the app reads now: car reader steps back"); car.stop(); carOwner = false }
+        if (!carOwner) applyState(newTitle, newSubtitle, newPlaying)
     }
 
     fun applyState(newTitle: String, newSubtitle: String, newPlaying: Boolean) {
@@ -347,6 +384,7 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
 
     override fun onDestroy() {
         instance = null
+        if (carOwner) try { car.release() } catch (_: Exception) {}
         releaseWake()
         abandonFocus()
         if (noisyRegistered) try { unregisterReceiver(noisyReceiver) } catch (_: Exception) {}

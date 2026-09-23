@@ -12,6 +12,7 @@ const native = NativeModules.LeggiMiPlayback as
       update(title: string, subtitle: string, playing: boolean): Promise<boolean>;
       stop(): Promise<boolean>;
       pending(): Promise<string | null>;
+      carState(): Promise<{ docId: string | null; index: number; playing: boolean }>;
     }
   | undefined;
 
@@ -33,6 +34,10 @@ export const playback = {
   /** the action Android Auto sent while the app was closed (consumed once) */
   async pending(): Promise<PlaybackAction | null> {
     try { return ((await native?.pending()) as PlaybackAction) || null; } catch { return null; }
+  },
+  /** what the native car reader is doing (reads on its own when the app is closed) */
+  async carState(): Promise<{ docId: string | null; index: number; playing: boolean }> {
+    try { return (await native?.carState()) ?? { docId: null, index: 0, playing: false }; } catch { return { docId: null, index: 0, playing: false }; }
   },
   onAction(cb: (a: PlaybackAction) => void) {
     const sub = DeviceEventEmitter.addListener("playback-action", (a: string) => cb(a as PlaybackAction));

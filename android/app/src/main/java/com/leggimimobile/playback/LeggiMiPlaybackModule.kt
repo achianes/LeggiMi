@@ -28,7 +28,7 @@ class LeggiMiPlaybackModule(private val ctx: ReactApplicationContext) : ReactCon
         try {
             val running = LeggiMiPlaybackService.instance
             if (running != null) {
-                running.applyState(title, subtitle, playing)
+                running.jsTakesOver(title, subtitle, playing)
             } else {
                 val i = Intent(ctx, LeggiMiPlaybackService::class.java)
                     .setAction(LeggiMiPlaybackService.ACTION_UPDATE)
@@ -41,6 +41,17 @@ class LeggiMiPlaybackModule(private val ctx: ReactApplicationContext) : ReactCon
         } catch (e: Exception) {
             promise.reject("playback", e.message ?: "playback service", e)
         }
+    }
+
+    /** what the car reader is doing, if anything: { docId, index, playing } */
+    @ReactMethod
+    fun carState(promise: Promise) {
+        val (id, index, playing) = LeggiMiPlaybackService.instance?.carState() ?: Triple(null, 0, false)
+        val m = com.facebook.react.bridge.Arguments.createMap()
+        m.putString("docId", id)
+        m.putInt("index", index)
+        m.putBoolean("playing", playing)
+        promise.resolve(m)
     }
 
     /** the action Android Auto (or a headset) sent while the app was closed, if any */

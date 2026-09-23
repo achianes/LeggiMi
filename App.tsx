@@ -39,13 +39,14 @@ import {
 } from "./src/comic";
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
+import Waveform from "./src/ui/Waveform";
 import { extractEpub } from "./src/docs/epub";
 import { LLM_MODELS, LLM_KEYS, LlmKey, getLlmKey, setLlmKey, hasLlm, deleteLlm, downloadLlm, cancelLlmDownload, loadLlm, askLlm, stopLlm, AskKind } from "./src/ai/llm";
 import { LANGS, langName as translationLangName, detectLanguage, translateDocument, cancelTranslation, translateAvailable } from "./src/translate/translate";
 import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
 import {
-  PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice,
+  PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice, piperVoiceFolder,
   downloadPiperVoice, cancelPiperDownload, deletePiperVoice, loadPiperVoice, piper,
 } from "./src/speech/piper";
 import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
@@ -607,6 +608,39 @@ async function saveProgress(fid: string, idx: number) {
   await AsyncStorage.setItem(`progress:${fid}`, String(idx));
   AsyncStorage.setItem(`progressAt:${fid}`, String(Date.now())).catch(() => {});
   onProgressSaved?.();
+}
+
+// ---- Car cache ---------------------------------------------------------------
+// The native media service reads documents on its own (Android Auto with the
+// app closed) from files/auto: plain sentences + chapters per document, the
+// voice to use, and a progress file it writes back.
+const AUTO_DIR = `${RNFS.DocumentDirectoryPath}/auto`;
+async function writeAutoDoc(fid: string, name: string, segs: string[]) {
+  try {
+    await RNFS.mkdir(AUTO_DIR).catch(() => {});
+    const chapters = buildChapters(segs).map((c) => ({ title: c.title, start: c.startIndex }));
+    const segments = segs.map((x) => sanitizeForTts(mdToPlain(x)));
+    await RNFS.writeFile(`${AUTO_DIR}/${hashStr(fid)}.json`, JSON.stringify({ id: fid, name, segments, chapters }), "utf8");
+  } catch {}
+}
+async function hasAutoDoc(fid: string) {
+  return RNFS.exists(`${AUTO_DIR}/${hashStr(fid)}.json`).catch(() => false);
+}
+async function writeAutoVoice(piperDir: string | null, rate: number) {
+  try {
+    await RNFS.mkdir(AUTO_DIR).catch(() => {});
+    await RNFS.writeFile(`${AUTO_DIR}/voice.json`, JSON.stringify({ piperDir, rate }), "utf8");
+  } catch {}
+}
+/** positions the car reader saved while the app was closed: { id: { index, total, at } } */
+async function readAutoProgress(): Promise<Record<string, { index: number; total: number; at: number }>> {
+  try {
+    const raw = await RNFS.readFile(`${AUTO_DIR}/progress.json`, "utf8");
+    const docs = JSON.parse(raw)?.docs;
+    return docs && typeof docs === "object" ? docs : {};
+  } catch {
+    return {};
+  }
 }
 
 // ---- Library (history) ------------------------------------------------------
@@ -1554,9 +1588,32 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
-    loadLibrary().then((list) => {
-      libraryRef.current = list;
-      setLibrary(list);
+    loadLibrary().then(async (list) => {
+      // positions the car reader moved while the app was closed win when newer
+      const car = await readAutoProgress();
+      let merged = list;
+      for (const [id, p] of Object.entries(car)) {
+        const i = merged.findIndex((e) => e.id === id);
+        if (i < 0) continue;
+        const localAt = await loadProgressAt(id);
+        if (p.at > localAt && p.index !== merged[i].index) {
+          merged = merged.slice();
+          merged[i] = { ...merged[i], index: p.index, lastOpenedAt: Math.max(merged[i].lastOpenedAt, p.at) };
+          await AsyncStorage.setItem(`progress:${id}`, String(p.index)).catch(() => {});
+          await AsyncStorage.setItem(`progressAt:${id}`, String(p.at)).catch(() => {});
+        }
+      }
+      libraryRef.current = merged;
+      setLibrary(merged);
+      if (merged !== list) persistLibrary(merged).catch(() => {});
+      // older documents get their car cache now, one at a time
+      for (const e of merged) {
+        if (!e.textPath || !e.total || (await hasAutoDoc(e.id))) continue;
+        try {
+          const text = await RNFS.readFile(e.textPath, "utf8");
+          await writeAutoDoc(e.id, e.name, segmentIntoSentences(text, { markdown: !!e.markdown }));
+        } catch {}
+      }
     });
   }, []);
 
@@ -1611,6 +1668,14 @@ function AppInner() {
     if (!ttsReady) return;
     Tts.setDefaultRate(rate, true).catch(() => {});
   }, [rate, ttsReady, settingsLoaded]);
+  // the car reader speaks with the same voice and speed as the app
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    (async () => {
+      const k = isPiperVoice(voiceId) ? piperKeyOf(voiceId) : null;
+      await writeAutoVoice(k ? await piperVoiceFolder(k) : null, rate);
+    })();
+  }, [voiceId, rate, settingsLoaded]);
 
   // load the installed voices once the engine is ready
   useEffect(() => {
@@ -1789,6 +1854,7 @@ function AppInner() {
 
     setIsReading(true);
     setIsPaused(false);
+    if (carPlayingRef.current) { carPlayingRef.current = false; setCarPlaying(false); }
 
     let i = Math.max(0, Math.min(startIndex, segs.length - 1));
     const first = i;
@@ -1874,12 +1940,39 @@ function AppInner() {
     else if (a === "stop") act.hardStop().then(() => playback.stop());
   };
   useEffect(() => playback.onAction(handlePlaybackAction), []);
+  // the native car reader is speaking (app closed, Android Auto): the app follows it
+  const [carPlaying, setCarPlaying] = useState(false);
+  const carPlayingRef = useRef(false);
+  useEffect(() => {
+    if (!carPlaying) return;
+    const t = setInterval(async () => {
+      const st = await playback.carState();
+      if (!st.docId || !st.playing) { setCarPlaying(false); carPlayingRef.current = false; return; }
+      if (st.docId === fileIdRef.current && st.index !== currentIdxRef.current) setCurrentIdx(st.index);
+    }, 2500);
+    return () => clearInterval(t);
+  }, [carPlaying]);
+
   // an action that arrived while the app was closed (the car's Play, a picked document)
   const pendingCheckedRef = useRef(false);
   useEffect(() => {
     if (pendingCheckedRef.current || !library.length) return;
     pendingCheckedRef.current = true;
-    playback.pending().then((a) => { if (a) setTimeout(() => handlePlaybackAction(a), 400); });
+    (async () => {
+      // the car reader may be speaking right now: open that document where it is, without a second voice
+      const car = await playback.carState();
+      if (car.docId) {
+        const e = libraryRef.current.find((x) => x.id === car.docId);
+        if (e) {
+          await AsyncStorage.setItem(`progress:${e.id}`, String(car.index)).catch(() => {});
+          if (car.playing) { setCarPlaying(true); carPlayingRef.current = true; }
+          openFromLibraryRef.current?.(e, false);
+          return;
+        }
+      }
+      const a = await playback.pending();
+      if (a) setTimeout(() => handlePlaybackAction(a), 400);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [library.length]);
 
@@ -2257,6 +2350,7 @@ function AppInner() {
         libraryRef.current = next;
         setLibrary(next);
         persistLibrary(next).catch(() => {});
+        writeAutoDoc(fid, meta.name, segs);
       } catch {}
     }
     return clamped;
@@ -3401,6 +3495,23 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
           <View style={s.progressTrack}>
             <View style={[s.progressFill, { width: `${Math.max(pct, 2)}%` }]} />
           </View>
+          {hasDoc ? (
+            <View style={s.nowRow}>
+              <Waveform active={isReading || carPlaying} live={isReading && isPiperVoice(voiceId)} color={INK} height={22} bars={16} width={104} />
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text numberOfLines={1} style={s.nowTitle}>
+                  {isReading ? "Reading" : carPlaying ? "Reading in the background" : isPaused ? "Paused" : "Ready"}
+                  {currentChapterIdx >= 0 ? ` · ${chapters[currentChapterIdx].title}` : ""}
+                </Text>
+                <Text numberOfLines={1} style={s.nowMeta}>
+                  {currentVoiceLabel} · {rate.toFixed(2)}× · {Math.max(0, segments.length - currentIdx - 1)} blocks left
+                  {currentChapterIdx >= 0 && chapters[currentChapterIdx].endIndex > currentIdx
+                    ? ` · ${chapters[currentChapterIdx].endIndex - currentIdx} to the end of the chapter`
+                    : ""}
+                </Text>
+              </View>
+            </View>
+          ) : null}
         </ComicBox>
       )}
 
@@ -4210,6 +4321,9 @@ function makeStyles(p: Palette) {
     headerBtn: { marginLeft: 2 },
 
     docCard: { marginHorizontal: 16, marginTop: 8, marginBottom: 4 },
+    nowRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 8 },
+    nowTitle: { fontFamily: FONT_BOLD, fontSize: 12.5, color: INK },
+    nowMeta: { fontFamily: FONT_BODY, fontSize: 11.5, color: INK, opacity: 0.75, marginTop: 1 },
     docCardInner: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 12 },
     docRow: { flexDirection: "row", alignItems: "center", gap: 10 },
     docBadge: {

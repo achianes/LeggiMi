@@ -74,7 +74,8 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **System voices**: every installed TTS voice too, the phone's language first, with a one-tap preview.
 - **Word by word**: inside the highlighted sentence the word being spoken is underlined (system voices report it; natural voices estimate it from the playback position).
 - **Keeps reading in the background**: with the screen off, in another app, in the car. A media card with Previous · Play/Pause · Next · Stop sits in the notification shade and on the lock screen; headset buttons work; a phone call pauses the reading and it resumes when the call ends; unplugging the headphones pauses it.
-- **Android Auto**: LeggiMi appears among the car's media apps with your Library; pick a document and it is read aloud, with Previous/Play/Next on the car screen and the steering-wheel buttons. Until the app is on Google Play, Android Auto shows it only with *Unknown sources* enabled in its developer settings (Android Auto app › tap the version ten times › Developer settings › Unknown sources).
+- **Android Auto**: LeggiMi appears among the car's media apps with your Library; pick a document and it is read aloud, with Previous/Play/Next on the car screen and the steering-wheel buttons. It works with the app closed too: the media service keeps a cache of every document's sentences and reads it by itself with your voice and speed, saving the position; when you open the app it picks up exactly there. Until the app is on Google Play, Android Auto shows it only with *Unknown sources* enabled in its developer settings (phone Settings › Apps › Android Auto › tap the version ten times › ⋮ › Developer settings › Unknown sources).
+- **Now reading**: the document card shows what is going on — a small waveform that follows the voice (the real loudness with natural voices), the chapter, the voice and speed, how many blocks are left in the document and in the chapter.
 - **Sleep timer**: 15, 30, 45 or 60 minutes, or “end of chapter”. The countdown shows in the document card; Play resumes from the very sentence where it stopped.
 - **Ask about this**: long‑press any sentence while reading and a small language model **on the phone** (through llama.cpp, downloaded once: **Fast** Gemma 3 1B 0.8 GB, **Better** Qwen2.5 3B 1.9 GB, **Best** Gemma 3 4B 2.5 GB, chosen in Settings › Assistant) explains the passage, tells what a sentence means, rewrites it in simpler words or summarises the chapter — in the language of the text (detected on the phone) or in Italian or English if you fix it in Settings › Assistant, and it can read the answer aloud. Nothing you read leaves the device. Turn it on from Settings › Assistant.
 - **Translate**: from the Library, 📤 › **Translate…** turns a whole document into another language on the phone (ML Kit; a ~30 MB pack per language is downloaded once). Headings, list items and paragraphs keep their shape, so the translation opens with the same chapters as the original; it is added to the Library and can be saved as PDF or TXT in Download/LeggiMi and then sent to your cloud. Eighteen languages, source detected automatically.
@@ -295,6 +296,7 @@ src/docs/webpage.ts                   # shared links: in-WebView article extract
 src/translate/translate.ts            # document translation keeping the Markdown shape
 src/ai/llm.ts                         # on-phone assistant: model download, prompts, streaming answers (llama.rn)
 src/playback/playback.ts              # media card / background reading bridge
+src/ui/Waveform.tsx                   # the comic waveform of the voice
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
   print/LeggiMiPrintService.kt        # the virtual printer
@@ -305,6 +307,7 @@ android/app/src/main/java/com/leggimimobile/
   cloud/LeggiMiCloudModule.kt         # WebDAV, Google Drive, Dropbox
   cloud/SecretStore.kt                # Keystore-encrypted secrets
   playback/LeggiMiPlaybackService.kt  # foreground media service + MediaBrowserService (Android Auto): notification, session, focus, wake lock
+  playback/CarReader.kt               # reads a cached document without the app (Piper or system TTS), keeps progress.json
   piper/LeggiMiPiperModule.kt         # sherpa-onnx Piper voices: unpack, load, speak, WAV synthesis
   piper/AacEncoder.kt                 # WAV -> .m4a with MediaCodec
   live/LiveReadActivity.kt            # camera preview + live text recognition (CameraX, ML Kit)

@@ -48,6 +48,7 @@ class LeggiMiPiperModule(private val ctx: ReactApplicationContext) : ReactContex
     private val pending = HashMap<String, Future<GeneratedAudio>>()
     @Volatile private var cancelToken = 0
     @Volatile private var track: AudioTrack? = null
+    @Volatile private var lastLevelAt = 0L
 
     private fun emit(name: String, body: Any?) {
         try {
@@ -230,6 +231,14 @@ class LeggiMiPiperModule(private val ctx: ReactApplicationContext) : ReactContex
                 val n = min(chunk, total - off)
                 val w = at.write(samples, off, n, AudioTrack.WRITE_BLOCKING)
                 if (w < 0) throw Exception("AudioTrack write error $w")
+                // loudness of what is about to play, for the waveform in the app
+                var acc = 0f
+                for (k in off until off + w) acc += samples[k] * samples[k]
+                val now = System.currentTimeMillis()
+                if (now - lastLevelAt > 50) {
+                    lastLevelAt = now
+                    emit("piper-level", Math.sqrt((acc / max(1, w)).toDouble()).toFloat())
+                }
                 off += w
                 lastWord = reportWord(id, text, words, at.playbackHeadPosition, total, lastWord)
             }
