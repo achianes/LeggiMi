@@ -29,6 +29,8 @@ class LeggiMiPlaybackModule(private val ctx: ReactApplicationContext) : ReactCon
             val running = LeggiMiPlaybackService.instance
             if (running != null) {
                 running.jsTakesOver(title, subtitle, playing)
+            } else if (!playing) {
+                // nothing is playing and no service: do not start one just to show a paused card
             } else {
                 val i = Intent(ctx, LeggiMiPlaybackService::class.java)
                     .setAction(LeggiMiPlaybackService.ACTION_UPDATE)

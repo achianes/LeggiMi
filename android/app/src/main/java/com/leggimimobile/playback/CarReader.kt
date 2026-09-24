@@ -145,6 +145,10 @@ class CarReader(private val ctx: Context, private val onState: (CarReader) -> Un
                     total = segments.size
                     index = fromIndex ?: savedIndex(target)
                 }
+                else if (fromIndex == null && !playing) {
+                    // the app may have read on meanwhile: take its newer position
+                    index = savedIndex(target)
+                }
                 if (fromIndex != null) index = fromIndex
                 index = index.coerceIn(0, max(0, total - 1))
                 loadVoice()

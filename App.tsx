@@ -607,6 +607,7 @@ let onProgressSaved: (() => void) | null = null;
 async function saveProgress(fid: string, idx: number) {
   await AsyncStorage.setItem(`progress:${fid}`, String(idx));
   AsyncStorage.setItem(`progressAt:${fid}`, String(Date.now())).catch(() => {});
+  queueAutoProgress(fid, idx);
   onProgressSaved?.();
 }
 
@@ -632,6 +633,34 @@ async function writeAutoVoice(piperDir: string | null, rate: number) {
     await RNFS.writeFile(`${AUTO_DIR}/voice.json`, JSON.stringify({ piperDir, rate }), "utf8");
   } catch {}
 }
+// the position read in the app goes to the car reader's progress file too, so
+// Android Auto (app closed) continues from there instead of the start
+const autoProgPending: Record<string, { index: number; at: number }> = {};
+let autoProgTimer: any = null;
+function queueAutoProgress(fid: string, index: number) {
+  autoProgPending[fid] = { index, at: Date.now() };
+  clearTimeout(autoProgTimer);
+  autoProgTimer = setTimeout(flushAutoProgress, 1500);
+}
+async function flushAutoProgress() {
+  const batch = { ...autoProgPending };
+  for (const k of Object.keys(autoProgPending)) delete autoProgPending[k];
+  if (!Object.keys(batch).length) return;
+  try {
+    await RNFS.mkdir(AUTO_DIR).catch(() => {});
+    const path = `${AUTO_DIR}/progress.json`;
+    let root: any = {};
+    try { root = JSON.parse(await RNFS.readFile(path, "utf8")) || {}; } catch {}
+    const docs = root.docs && typeof root.docs === "object" ? root.docs : {};
+    for (const [id, p] of Object.entries(batch)) {
+      const prev = docs[id] || {};
+      if ((prev.at ?? 0) <= p.at) docs[id] = { ...prev, index: p.index, at: p.at };
+    }
+    root.docs = docs;
+    await RNFS.writeFile(path, JSON.stringify(root), "utf8");
+  } catch {}
+}
+
 /** positions the car reader saved while the app was closed: { id: { index, total, at } } */
 async function readAutoProgress(): Promise<Record<string, { index: number; total: number; at: number }>> {
   try {

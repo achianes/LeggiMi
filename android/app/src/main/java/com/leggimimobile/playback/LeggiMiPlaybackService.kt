@@ -79,17 +79,35 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         }
     }
     @Volatile private var carOwner = false
+    /** the media card is shown only once something has actually been read in this run */
+    @Volatile private var cardWanted = false
+
+    /** Stop pressed or the card swiped away: no card, no session, service gone. */
+    private fun shutDown() {
+        playing = false
+        cardWanted = false
+        releaseWake()
+        abandonFocus()
+        try {
+            session.setPlaybackState(PlaybackStateCompat.Builder().setState(PlaybackStateCompat.STATE_STOPPED, 0, 0f).build())
+            session.isActive = false
+        } catch (_: Exception) {}
+        try { if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true) } catch (_: Exception) {}
+        try { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID) } catch (_: Exception) {}
+        stopSelf()
+    }
 
     /** hands an action to JS when it is running, otherwise to the car reader */
     private fun dispatch(action: String) {
         val l = listener
-        if (l != null && !carOwner) { l(action); return }
+        if (action == "stop") cardWanted = false
+        if (l != null && !carOwner) { l(action); if (action == "stop") shutDown(); return }
         when {
             action == "play" -> { carOwner = true; car.play() }
             action == "pause" -> if (carOwner) car.pause()
             action == "next" -> if (carOwner) car.skip(1)
             action == "prev" -> if (carOwner) car.skip(-1)
-            action == "stop" -> { if (carOwner) car.stop(); carOwner = false; applyState(title, subtitle, false) }
+            action == "stop" -> { if (carOwner) car.stop(); carOwner = false; shutDown() }
             action.startsWith("open:") -> {
                 val id = action.removePrefix("open:")
                 if (car.hasCache(id)) { carOwner = true; car.play(id) }
@@ -106,7 +124,12 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
 
     // ------------------------------------------------ Android Auto: the browse tree
 
-    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot = BrowserRoot(ROOT_ID, null)
+    override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot? {
+        // Android's "resume media" card asks with EXTRA_RECENT: opt out, or the
+        // phone keeps offering LeggiMi among the active players after a swipe
+        if (rootHints?.getBoolean(BrowserRoot.EXTRA_RECENT) == true) return null
+        return BrowserRoot(ROOT_ID, null)
+    }
 
     override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
         val items = mutableListOf<MediaBrowserCompat.MediaItem>()
@@ -203,8 +226,16 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
             isActive = true
         }
         sessionToken = session.sessionToken
-        // a paused card right away, so Android Auto has something to show
-        publish()
+        // Android Auto binds us when the car connects: a session it can talk to,
+        // but no card on the phone until something is read
+        try {
+            session.setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID)
+                    .setState(PlaybackStateCompat.STATE_NONE, 0, 0f)
+                    .build()
+            )
+        } catch (_: Exception) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -224,8 +255,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
                 return START_NOT_STICKY
             }
         }
-        // a button intent while foreground was requested: show the card at once (5 s rule)
-        publish()
+        // started as a foreground service for a button: satisfy the 5 s rule, then let the action decide
+        if (cardWanted || playing) publish() else if (intent?.action == ACTION_STOP) shutDown() else foregroundBriefly()
         return START_NOT_STICKY
     }
 
@@ -243,6 +274,7 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         if (!newPlaying && playing && SystemClock.uptimeMillis() - focusPauseAt > 2500) resumeOnFocusGain = false
         if (newPlaying) resumeOnFocusGain = false
         playing = newPlaying
+        if (playing) { cardWanted = true; try { session.isActive = true } catch (_: Exception) {} }
         // foreground first: Android 15 refuses audio focus to an app that is still in the background
         publish()
         if (playing) {
@@ -253,11 +285,17 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
 
     private fun publish() {
         try {
+            val art = artwork()
             session.setMetadata(
                 MediaMetadataCompat.Builder()
                     .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                     .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
                     .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "LeggiMi")
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
+                    .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
+                    .putBitmap(MediaMetadataCompat.METADATA_KEY_ART, art)
+                    .putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, art)
                     .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, -1L)
                     .build()
             )
@@ -273,6 +311,11 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
                     )
                     .build()
             )
+            if (!cardWanted) {
+                // nothing read yet (e.g. just bound by Android Auto) or stopped: no card on the phone
+                try { (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(NOTIF_ID) } catch (_: Exception) {}
+                return
+            }
             val notification = buildNotification()
             if (playing) {
                 if (Build.VERSION.SDK_INT >= 29) {
@@ -290,6 +333,63 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         }
     }
 
+    /** a card for 5 s rule compliance when started for a button with nothing to show yet */
+    private fun foregroundBriefly() {
+        try {
+            val n = NotificationCompat.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.ic_stat_leggimi)
+                .setContentTitle("LeggiMi").setPriority(NotificationCompat.PRIORITY_LOW).build()
+            if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK) else startForeground(NOTIF_ID, n)
+            android.os.Handler(mainLooper).postDelayed({ if (!cardWanted && !playing) shutDown() }, 3000)
+        } catch (e: Exception) { Log.w(TAG, "foreground", e) }
+    }
+
+    // ------------------------------------------------ artwork: what Android Auto can show
+    // Media apps cannot draw on the car screen; the cover is the only picture it
+    // shows. It is drawn here: the comic waveform (a new shape for every sentence),
+    // the title and the chapter.
+    private var artKey = ""
+    private var artBmp: android.graphics.Bitmap? = null
+
+    private fun artwork(): android.graphics.Bitmap {
+        val key = "$title|$subtitle|$playing"
+        artBmp?.let { if (key == artKey) return it }
+        val size = 320
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
+        val c = android.graphics.Canvas(bmp)
+        val ink = 0xFF1B1B1F.toInt()
+        c.drawColor(if (playing) 0xFFFFD93D.toInt() else 0xFFF4E4C1.toInt())
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = ink }
+        val border = android.graphics.Paint(p).apply { style = android.graphics.Paint.Style.STROKE; strokeWidth = 9f }
+        c.drawRoundRect(android.graphics.RectF(6f, 6f, size - 6f, size - 6f), 30f, 30f, border)
+        // waveform: a shape of its own for every sentence, flat when paused
+        val rnd = java.util.Random(subtitle.hashCode().toLong() * 31 + title.hashCode())
+        val bars = 17
+        val bw = 10f
+        val left = 30f
+        val gap = (size - 2 * left - bars * bw) / (bars - 1)
+        val cy = size * 0.52f
+        for (i in 0 until bars) {
+            val mid = 1f - kotlin.math.abs(i - (bars - 1) / 2f) / ((bars - 1) / 2f) * 0.55f
+            val h = if (playing) (18f + rnd.nextFloat() * 120f) * mid + 12f else 10f
+            val x = left + i * (bw + gap)
+            c.drawRoundRect(android.graphics.RectF(x, cy - h / 2, x + bw, cy + h / 2), 5f, 5f, p)
+        }
+        val tp = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = ink; textSize = 26f; typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        val t = android.text.TextUtils.ellipsize(title, tp, size - 56f, android.text.TextUtils.TruncateAt.END).toString()
+        c.drawText(t, 28f, 58f, tp)
+        val chapter = subtitle.substringBefore(" · ").let { if (it.contains("%")) "" else it }
+        if (chapter.isNotEmpty()) {
+            val sp = android.text.TextPaint(tp).apply { textSize = 21f; typeface = android.graphics.Typeface.DEFAULT }
+            val ch = android.text.TextUtils.ellipsize(chapter, sp, size - 56f, android.text.TextUtils.TruncateAt.END).toString()
+            c.drawText(ch, 28f, size - 34f, sp)
+        }
+        artKey = key
+        artBmp = bmp
+        return bmp
+    }
+
     private fun pending(action: String): PendingIntent {
         val i = Intent(this, LeggiMiPlaybackService::class.java).setAction(action)
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -304,6 +404,7 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         )
         val b = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_leggimi)
+            .setLargeIcon(artwork())
             .setContentTitle(title)
             .setContentText(subtitle)
             .setContentIntent(open)
