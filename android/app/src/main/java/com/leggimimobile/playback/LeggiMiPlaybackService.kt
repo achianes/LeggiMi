@@ -60,6 +60,10 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         /** an action that arrived while the app was not running (Android Auto): consumed by JS at start */
         @Volatile var pendingAction: String? = null
         const val ROOT_ID = "leggimi_root"
+        /** what the car may ask for when nothing is playing */
+        const val IDLE_ACTIONS = PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PLAY_PAUSE or
+            PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
         const val AUTO_LIBRARY_FILE = "auto_library.json"
     }
 
@@ -107,7 +111,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         releaseWake()
         abandonFocus()
         try {
-            session.setPlaybackState(PlaybackStateCompat.Builder().setState(PlaybackStateCompat.STATE_STOPPED, 0, 0f).build())
+            // stopped, but Play stays available: Android Auto hides every button otherwise
+            session.setPlaybackState(PlaybackStateCompat.Builder().setActions(IDLE_ACTIONS).setState(PlaybackStateCompat.STATE_STOPPED, 0, 0f).build())
             session.isActive = false
         } catch (_: Exception) {}
         try { if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true) } catch (_: Exception) {}
@@ -252,8 +257,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         try {
             session.setPlaybackState(
                 PlaybackStateCompat.Builder()
-                    .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID)
-                    .setState(PlaybackStateCompat.STATE_NONE, 0, 0f)
+                    .setActions(IDLE_ACTIONS)
+                    .setState(PlaybackStateCompat.STATE_STOPPED, 0, 0f)
                     .build()
             )
         } catch (_: Exception) {}
@@ -322,7 +327,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
             )
             val actions = PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
                 PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_STOP or
+                PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH
             session.setPlaybackState(
                 PlaybackStateCompat.Builder()
                     .setActions(actions)
