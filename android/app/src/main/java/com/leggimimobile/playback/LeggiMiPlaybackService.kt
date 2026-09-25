@@ -82,6 +82,24 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
     /** the media card is shown only once something has actually been read in this run */
     @Volatile private var cardWanted = false
 
+    /** Android Auto only binds us; to read with the app closed the service must be started too. */
+    private fun ensureStarted() {
+        try {
+            val i = Intent(this, LeggiMiPlaybackService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+            Log.i(TAG, "started for the car reader")
+        } catch (e: Exception) { Log.w(TAG, "cannot start the service", e) }
+    }
+
+    /** The app was swiped away from the recent apps: LeggiMi leaves the phone and the car too. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "task removed: shutting down")
+        if (carOwner) try { car.stop() } catch (_: Exception) {}
+        carOwner = false
+        shutDown()
+        super.onTaskRemoved(rootIntent)
+    }
+
     /** Stop pressed or the card swiped away: no card, no session, service gone. */
     private fun shutDown() {
         playing = false
@@ -102,6 +120,7 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         val l = listener
         if (action == "stop") cardWanted = false
         if (l != null && !carOwner) { l(action); if (action == "stop") shutDown(); return }
+        if (l == null && (action == "play" || action.startsWith("open:"))) ensureStarted()
         when {
             action == "play" -> { carOwner = true; car.play() }
             action == "pause" -> if (carOwner) car.pause()
@@ -223,7 +242,9 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
                 }
                 override fun onPlayFromSearch(query: String?, extras: Bundle?) { dispatch("play") }
             })
-            isActive = true
+            // not active until something is read: an active session puts LeggiMi in
+            // Android Auto's bar and among the phone's players
+            isActive = false
         }
         sessionToken = session.sessionToken
         // Android Auto binds us when the car connects: a session it can talk to,
