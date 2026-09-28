@@ -24,6 +24,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.leggimimobile.playback.L10n
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
@@ -73,7 +74,7 @@ class LiveReadActivity : AppCompatActivity() {
 
         val dp = resources.displayMetrics.density
         status = TextView(this).apply {
-            text = "Point the camera at some text"
+            text = L10n.t(this@LiveReadActivity, "Point the camera at some text")
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setBackgroundColor(0x99000000.toInt())
@@ -106,12 +107,12 @@ class LiveReadActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setOnClickListener { onClick() }
         }
-        val close = btn("Close", 0xFFFF6B6B.toInt()) { finish() }
-        autoBtn = btn(if (auto) "Auto: on" else "Auto: off", 0xFFFFD93D.toInt()) {
+        val close = btn(L10n.t(this@LiveReadActivity, "Close"), 0xFFFF6B6B.toInt()) { finish() }
+        autoBtn = btn(if (auto) L10n.t(this@LiveReadActivity, "Auto: on") else L10n.t(this@LiveReadActivity, "Auto: off"), 0xFFFFD93D.toInt()) {
             auto = !auto
-            autoBtn.text = if (auto) "Auto: on" else "Auto: off"
+            autoBtn.text = if (auto) L10n.t(this@LiveReadActivity, "Auto: on") else L10n.t(this@LiveReadActivity, "Auto: off")
         }
-        val readNow = btn("Read this", 0xFF6BCB77.toInt()) {
+        val readNow = btn(L10n.t(this@LiveReadActivity, "Read this"), 0xFF6BCB77.toInt()) {
             val t = latest
             if (t.isNotBlank()) hand(t, force = true)
         }
@@ -131,7 +132,7 @@ class LiveReadActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 71) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startCamera()
-            else { status.text = "Camera permission is needed"; finish() }
+            else { status.text = L10n.t(this@LiveReadActivity, "Camera permission is needed"); finish() }
         }
     }
 
@@ -148,7 +149,7 @@ class LiveReadActivity : AppCompatActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, analysis)
             } catch (e: Exception) {
-                runOnUiThread { status.text = "Camera not available: ${e.message}" }
+                runOnUiThread { status.text = "${L10n.t(this@LiveReadActivity, "Camera not available")}: ${e.message}" }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -178,9 +179,9 @@ class LiveReadActivity : AppCompatActivity() {
             overlay.text = if (text.isBlank()) "" else text
             overlay.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
             status.text = when {
-                text.isBlank() -> "Point the camera at some text"
-                auto -> "Hold still: reading when the text settles"
-                else -> "Tap Read this"
+                text.isBlank() -> L10n.t(this@LiveReadActivity, "Point the camera at some text")
+                auto -> L10n.t(this@LiveReadActivity, "Hold still: reading when the text settles")
+                else -> L10n.t(this@LiveReadActivity, "Tap Read this")
             }
         }
         if (text.isBlank()) { candidate = ""; candidateHits = 0; return }
@@ -196,7 +197,7 @@ class LiveReadActivity : AppCompatActivity() {
         if (handed.isNotEmpty()) handed.append("\n\n")
         handed.append(text)
         onText?.invoke(text)
-        runOnUiThread { status.text = "Reading…" }
+        runOnUiThread { status.text = L10n.t(this@LiveReadActivity, "Reading…") }
     }
 
     private fun words(s: String) = s.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.toSet()

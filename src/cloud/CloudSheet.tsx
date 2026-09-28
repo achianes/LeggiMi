@@ -1,6 +1,7 @@
 // Cloud accounts sheet: manage accounts (Settings) or pick one to upload a file.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { View, Text, Modal, Pressable, ScrollView, TextInput, ActivityIndicator, Alert, StyleSheet, Linking } from "react-native";
+import { View, Modal, Pressable, ScrollView, TextInput, ActivityIndicator, Alert, StyleSheet, Linking } from "react-native";
+import { Text, t } from "../i18n";
 import {
   INK, YELLOW, CORAL, MINT, FONT_BODY, FONT_BOLD, Palette,
   ComicBox, ComicButton, ComicIconButton, ComicChip, PosterTitle,

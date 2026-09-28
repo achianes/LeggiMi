@@ -60,6 +60,10 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 
 ## Features
 
+### Languages
+- **The app speaks five languages**: English, Italiano, Español, Français, Deutsch — every button, message and sheet. Settings › Language: follow the phone, or pick one; the switch is instant. The documents are always read in their own language.
+- **Natural voices for all five**: 29 Piper voices (Italian, English US/UK, Spanish from Spain, Mexico and Argentina, French, German), each tagged with language, gender and quality. The Voice sheet filters them by language.
+
 ### Reading
 - **Many formats**: PDF, EPUB, DOCX (Word), RTF, TXT, Markdown and other plain-text files. EPUB books keep their chapters (from the table of contents) and their headings.
 - **Web pages**: share a link from the browser and LeggiMi reads the article: menus, banners, footers and sidebars are dropped, headings and paragraphs are kept. The page is loaded once, on the phone.
@@ -70,7 +74,7 @@ It wears the same comic look as its sibling app *Pay & Plan*.
 - **Readable blocks**: text is split into Markdown-aware blocks. Headings, bullet and numbered lists, quotes, bold, italic, code and links are rendered; the voice reads clean text.
 - **Smart PDF extraction**: lines and paragraphs are rebuilt from glyph positions, so chapter titles are recognised. Tables of contents, page numbers and repeated headers are dropped. Lines wrapped by the page layout are joined back into sentences, and paragraphs cut by a page break (a line ending in “and”, “of”, “e”, “di”…) are joined back too. Leftovers of images such as “[]” are dropped.
 - **Chapters**: when a document has a table of contents, its titles are used to find the chapter headings in the text (so “Prologue” or “Epilogue” are found even when they do not look like headings; dot leaders are not needed, numbered titles like “7. Back home” are chapters rather than list items, titles wrapped on two lines are glued back, and the index itself is not read aloud); otherwise detected headings, or evenly split parts. Shown in a slide-up index.
-- **Natural voices, on the phone**: Piper neural voices (Paola and Riccardo for Italian, Amy, Ryan, Alan and Alba for English) run locally through sherpa-onnx. Each voice is downloaded once (13–21 MB) from Settings › Voice; after that it speaks offline, with the next sentence synthesised while the current one plays. They also work on phones that have no system speech engine at all.
+- **Natural voices, on the phone**: Piper neural voices (29 of them, for Italian, English, Spanish, French and German) run locally through sherpa-onnx. Each voice is downloaded once (13–21 MB) from Settings › Voice; after that it speaks offline, with the next sentence synthesised while the current one plays. They also work on phones that have no system speech engine at all.
 - **System voices**: every installed TTS voice too, the phone's language first, with a one-tap preview.
 - **Word by word**: inside the highlighted sentence the word being spoken is underlined (system voices report it; natural voices estimate it from the playback position).
 - **Keeps reading in the background**: with the screen off, in another app, in the car. A media card with Previous · Play/Pause · Next · Stop sits in the notification shade and on the lock screen; headset buttons work; a phone call pauses the reading and it resumes when the call ends; unplugging the headphones pauses it.
@@ -297,6 +301,7 @@ src/translate/translate.ts            # document translation keeping the Markdow
 src/ai/llm.ts                         # on-phone assistant: model download, prompts, streaming answers (llama.rn)
 src/playback/playback.ts              # media card / background reading bridge
 src/ui/Waveform.tsx                   # the comic waveform of the voice
+src/i18n/                             # UI translations: index.tsx (Text/Alert that translate), it/es/fr/de.json
 android/app/src/main/java/com/leggimimobile/
   MainActivity.kt, MainApplication.kt
   print/LeggiMiPrintService.kt        # the virtual printer

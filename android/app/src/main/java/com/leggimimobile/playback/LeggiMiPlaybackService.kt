@@ -442,11 +442,11 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", pending(ACTION_PREV))
-        if (playing) b.addAction(android.R.drawable.ic_media_pause, "Pause", pending(ACTION_PAUSE))
-        else b.addAction(android.R.drawable.ic_media_play, "Play", pending(ACTION_PLAY))
-        b.addAction(android.R.drawable.ic_media_next, "Next", pending(ACTION_NEXT))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", pending(ACTION_STOP))
+            .addAction(android.R.drawable.ic_media_previous, L10n.t(this, "Previous"), pending(ACTION_PREV))
+        if (playing) b.addAction(android.R.drawable.ic_media_pause, L10n.t(this, "Pause"), pending(ACTION_PAUSE))
+        else b.addAction(android.R.drawable.ic_media_play, L10n.t(this, "Play"), pending(ACTION_PLAY))
+        b.addAction(android.R.drawable.ic_media_next, L10n.t(this, "Next"), pending(ACTION_NEXT))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, L10n.t(this, "Stop"), pending(ACTION_STOP))
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(session.sessionToken)
@@ -459,8 +459,8 @@ class LeggiMiPlaybackService : MediaBrowserServiceCompat() {
         if (Build.VERSION.SDK_INT < 26) return
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel(CHANNEL_ID) != null) return
-        val ch = NotificationChannel(CHANNEL_ID, "Reading aloud", NotificationManager.IMPORTANCE_LOW)
-        ch.description = "Controls of the document being read"
+        val ch = NotificationChannel(CHANNEL_ID, L10n.t(this, "Reading aloud"), NotificationManager.IMPORTANCE_LOW)
+        ch.description = L10n.t(this, "Controls of the document being read")
         ch.setShowBadge(false)
         nm.createNotificationChannel(ch)
     }

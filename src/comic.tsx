@@ -1,7 +1,8 @@
 // Comic UI kit shared by every LeggiMi screen: the Pay & Plan look
 // (flat fills, fat ink outlines, hard offset shadows, poster lettering).
 import React from "react";
-import { View, Text, Pressable, StyleProp, ViewStyle, TextStyle } from "react-native";
+import { View, Pressable, StyleProp, ViewStyle, TextStyle } from "react-native";
+import { Text } from "./i18n";
 
 export type ThemeName = "dark" | "light" | "sepia";
 

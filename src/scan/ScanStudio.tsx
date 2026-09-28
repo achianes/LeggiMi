@@ -5,7 +5,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
-  Text,
   Modal,
   ScrollView,
   Image,
@@ -17,6 +16,7 @@ import {
   useWindowDimensions,
   LayoutChangeEvent,
 } from "react-native";
+import { Text, t } from "../i18n";
 import RNFS from "react-native-fs";
 import { pick, keepLocalCopy, types } from "@react-native-documents/picker";
 import {
@@ -661,7 +661,7 @@ export default function ScanStudio(props: Props) {
               onEndEditing={rename}
               onSubmitEditing={rename}
               style={s.nameInput}
-              placeholder="Document name"
+              placeholder={t("Document name")}
               placeholderTextColor={palette.dim}
               selectTextOnFocus
             />
@@ -809,7 +809,7 @@ export default function ScanStudio(props: Props) {
                   value={exportName}
                   onChangeText={setExportName}
                   style={s.fieldInput}
-                  placeholder="Document name"
+                  placeholder={t("Document name")}
                   placeholderTextColor={palette.dim}
                   selectTextOnFocus
                 />

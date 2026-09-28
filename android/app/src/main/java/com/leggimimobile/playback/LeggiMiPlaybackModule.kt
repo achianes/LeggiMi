@@ -45,6 +45,12 @@ class LeggiMiPlaybackModule(private val ctx: ReactApplicationContext) : ReactCon
         }
     }
 
+    /** the app's language, for the few words drawn natively (media card, live reading) */
+    @ReactMethod
+    fun setUiLanguage(lang: String) {
+        L10n.setLang(ctx, lang)
+    }
+
     /** what the car reader is doing, if anything: { docId, index, playing } */
     @ReactMethod
     fun carState(promise: Promise) {

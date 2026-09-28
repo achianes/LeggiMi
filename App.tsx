@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
-  Text,
   StyleSheet,
   Alert,
   Pressable,
@@ -39,6 +38,7 @@ import {
 } from "./src/comic";
 import ScanStudio from "./src/scan/ScanStudio";
 import { playback } from "./src/playback/playback";
+import { Text, RawText, t, tr, useLang, loadLang, setLang, getLangChoice, UI_LANGS, UiLang } from "./src/i18n";
 import Waveform from "./src/ui/Waveform";
 import { extractEpub } from "./src/docs/epub";
 import { LLM_MODELS, LLM_KEYS, LlmKey, getLlmKey, setLlmKey, hasLlm, deleteLlm, downloadLlm, cancelLlmDownload, loadLlm, askLlm, stopLlm, AskKind } from "./src/ai/llm";
@@ -46,7 +46,7 @@ import { LANGS, langName as translationLangName, detectLanguage, translateDocume
 import { isSyncOn, setSyncOn, syncAccountId, pullProgress, pushProgress, RemoteProgress } from "./src/cloud/sync";
 import { sharedLink, READER_JS } from "./src/docs/webpage";
 import {
-  PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice, piperVoiceFolder,
+  PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice, piperVoiceFolder, voiceNote, voiceLang,
   downloadPiperVoice, cancelPiperDownload, deletePiperVoice, loadPiperVoice, piper,
 } from "./src/speech/piper";
 import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
@@ -765,10 +765,10 @@ function fmtDate(ts: number) {
   const sameDay = d.toDateString() === now.toDateString();
   const hh = `${d.getHours()}`.padStart(2, "0");
   const mm = `${d.getMinutes()}`.padStart(2, "0");
-  if (sameDay) return `today ${hh}:${mm}`;
+  if (sameDay) return t("today {0}:{1}", hh, mm);
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const year = d.getFullYear() === now.getFullYear() ? "" : ` ${d.getFullYear()}`;
-  return `${d.getDate()} ${months[d.getMonth()]}${year}`;
+  return `${d.getDate()} ${t(months[d.getMonth()])}${year}`;
 }
 
 // ---- OCR (Google ML Kit, on device) ----------------------------------------
@@ -992,7 +992,7 @@ function renderWithWord(t: string, word: SpokenWord | null | undefined, base: Te
   if (word && word.text === t && !hasMdTokens(t) && word.end > word.start && word.end <= t.length) {
     return [
       t.slice(0, word.start),
-      <Text key="w" style={{ fontFamily: FONT_BOLD, textDecorationLine: "underline" }}>{t.slice(word.start, word.end)}</Text>,
+      <RawText key="w" style={{ fontFamily: FONT_BOLD, textDecorationLine: "underline" }}>{t.slice(word.start, word.end)}</RawText>,
       t.slice(word.end),
     ];
   }
@@ -1043,7 +1043,7 @@ function renderInline(text: string, base: TextStyle, palette: Palette, strong: b
       inner = tok.slice(1, -1);
       style = { fontStyle: "italic" };
     }
-    nodes.push(<Text key={k++} style={style}>{inner}</Text>);
+    nodes.push(<RawText key={k++} style={style}>{inner}</RawText>);
     last = m.index + tok.length;
   }
   if (last < text.length) nodes.push(text.slice(last));
@@ -1066,7 +1066,7 @@ function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps)
           const size = Math.round(fontSize * scale);
           const poster = p.level <= 2;
           return (
-            <Text
+            <RawText
               key={i}
               style={{
                 color,
@@ -1080,7 +1080,7 @@ function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps)
               }}
             >
               {renderInline(poster ? p.text.toUpperCase() : p.text, body, palette, strong)}
-            </Text>
+            </RawText>
           );
         }
         if (p.kind === "rule") {
@@ -1089,10 +1089,10 @@ function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps)
         if (p.kind === "bullet" || p.kind === "number") {
           return (
             <View key={i} style={{ flexDirection: "row", alignItems: "flex-start", paddingLeft: 6 }}>
-              <Text style={[body, { fontFamily: FONT_BOLD, width: p.kind === "bullet" ? 20 : 30 }]}>
+              <RawText style={[body, { fontFamily: FONT_BOLD, width: p.kind === "bullet" ? 20 : 30 }]}>
                 {p.kind === "bullet" ? "•" : p.marker}
-              </Text>
-              <Text style={[body, { flex: 1 }]}>{renderInline(p.text, body, palette, strong)}</Text>
+              </RawText>
+              <RawText style={[body, { flex: 1 }]}>{renderInline(p.text, body, palette, strong)}</RawText>
             </View>
           );
         }
@@ -1100,12 +1100,12 @@ function MdBlock({ text, fontSize, color, palette, strong, word }: MdBlockProps)
           return (
             <View key={i} style={{ flexDirection: "row", alignItems: "stretch" }}>
               <View style={{ width: 4, borderRadius: 2, backgroundColor: strong ? INK : palette.ink, marginRight: 10, opacity: 0.7 }} />
-              <Text style={[body, { flex: 1, fontStyle: "italic" }]}>{renderInline(p.text, body, palette, strong)}</Text>
+              <RawText style={[body, { flex: 1, fontStyle: "italic" }]}>{renderInline(p.text, body, palette, strong)}</RawText>
             </View>
           );
         }
         return (
-          <Text key={i} style={body}>{renderWithWord(p.text, word, body, palette, strong)}</Text>
+          <RawText key={i} style={body}>{renderWithWord(p.text, word, body, palette, strong)}</RawText>
         );
       })}
     </View>
@@ -1168,12 +1168,12 @@ const ParagraphRow = React.memo(function ParagraphRow({
   const body: TextStyle = { color: palette.text, fontSize, lineHeight, fontFamily: FONT_BODY };
   return (
     <View style={cont ? rowStyles.cont : rowStyles.para}>
-      <Text style={body}>
+      <RawText style={body}>
         {segs.map((t, j) => {
           const i = start + j;
           const active = i === activeIdx;
           return (
-            <Text
+            <RawText
               key={i}
               onPress={() => onPress(i)}
               onLongPress={() => onAsk?.(i)}
@@ -1181,10 +1181,10 @@ const ParagraphRow = React.memo(function ParagraphRow({
             >
               {active ? renderWithWord(t, word, body, palette, active) : renderInline(t, body, palette, false)}
               {j < segs.length - 1 ? " " : ""}
-            </Text>
+            </RawText>
           );
         })}
-      </Text>
+      </RawText>
     </View>
   );
 });
@@ -2051,7 +2051,11 @@ function AppInner() {
       try { await loadPiperVoice(k); }
       catch (e: any) { Alert.alert("Natural voice", String(e?.message ?? e)); return; }
       spokenRef.current = null;
-      const phrase = PIPER_VOICES[k].lang.startsWith("it") ? "Ciao, questa è la voce selezionata." : "Hi, this is the selected voice.";
+      const PREVIEW: Record<string, string> = {
+        it: "Ciao, questa è la voce selezionata.", es: "Hola, esta es la voz elegida.",
+        fr: "Bonjour, voici la voix choisie.", de: "Hallo, das ist die gewählte Stimme.", en: "Hi, this is the selected voice.",
+      };
+      const phrase = PREVIEW[PIPER_VOICES[k].lang.slice(0, 2)] ?? PREVIEW.en;
       try { await piper.speak("preview", phrase, rateRef.current); } catch {}
       return;
     }
@@ -2073,14 +2077,21 @@ function AppInner() {
   const [ai, setAi] = useState<AiState | null>(null);
   const aiRef = useRef<AiState | null>(null);
   useEffect(() => { aiRef.current = ai; }, [ai]);
+  const uiLang = useLang();
+  const [langChoice, setLangChoice] = useState<UiLang | "auto">(getLangChoice());
+  useEffect(() => {
+    loadLang().then(() => { setLangChoice(getLangChoice()); setVoiceLangFilter(getLangChoice() === "auto" ? uiLang : (getLangChoice() as UiLang)); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [voiceLangFilter, setVoiceLangFilter] = useState<UiLang>(uiLang);
   const [llmKey, setLlmKeyState] = useState<LlmKey>("gemma1b");
   // language of the answers: the text's own (auto) or a fixed one
-  type LlmLang = "auto" | "it" | "en";
+  type LlmLang = "auto" | UiLang;
   const [llmLang, setLlmLangState] = useState<LlmLang>("auto");
   const llmLangRef = useRef<LlmLang>("auto");
   useEffect(() => {
     AsyncStorage.getItem("settings:llmLang").then((v) => {
-      const l: LlmLang = v === "it" || v === "en" ? v : "auto";
+      const l: LlmLang = UI_LANGS.some((x) => x.code === v) ? (v as UiLang) : "auto";
       setLlmLangState(l);
       llmLangRef.current = l;
     }).catch(() => {});
@@ -2281,18 +2292,18 @@ function AppInner() {
     const v = PIPER_VOICES[k];
     const ok = await askChoice(
       "DOWNLOAD THE VOICE?",
-      `${v.label} — ${v.note}. Downloaded once, then it speaks offline. Wi‑Fi recommended.`,
+      `${v.label} — ${voiceNote(v)}. Downloaded once, then it speaks offline. Wi‑Fi recommended.`,
       "🗣️",
       [{ key: "yes", icon: "⬇️", label: "Download", color: MINT }]
     );
     if (ok !== "yes") return false;
     setIsExtracting(true);
-    setTask({ title: "DOWNLOADING THE VOICE", sub: v.note, progress: 0, cancel: cancelPiperDownload });
+    setTask({ title: "DOWNLOADING THE VOICE", sub: voiceNote(v), progress: 0, cancel: cancelPiperDownload });
     try {
       await downloadPiperVoice(k, (st) =>
         st === "unpacking"
           ? setTask({ title: "UNPACKING THE VOICE", sub: v.label })
-          : setTask({ title: "DOWNLOADING THE VOICE", sub: v.note, progress: st, cancel: cancelPiperDownload })
+          : setTask({ title: "DOWNLOADING THE VOICE", sub: voiceNote(v), progress: st, cancel: cancelPiperDownload })
       );
       await refreshPiperReady();
       return true;
@@ -3722,6 +3733,15 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 <PosterTitle text="SETTINGS" palette={palette} size={26} />
               </View>
 
+              <Text style={s.sheetLabel}>Language</Text>
+              <View style={s.chipRow}>
+                <ComicChip text={t("Phone language")} selected={langChoice === "auto"} onPress={() => { setLang("auto"); setLangChoice("auto"); }} palette={palette} color={YELLOW} />
+                {UI_LANGS.map((l) => (
+                  <ComicChip key={l.code} text={`${l.flag} ${l.name}`} selected={langChoice === l.code} onPress={() => { setLang(l.code); setLangChoice(l.code); setVoiceLangFilter(l.code); }} palette={palette} color={SKY} />
+                ))}
+              </View>
+              <Text style={[s.voiceHint, { marginTop: 6 }]}>Buttons and messages of the app. The documents are always read in their own language.</Text>
+
               <Text style={s.sheetLabel}>Cloud drives</Text>
               <ComicBox
                 palette={palette}
@@ -3828,8 +3848,9 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               <Text style={[s.voiceHint, { marginTop: 10 }]}>Answers in</Text>
               <View style={s.chipRow}>
                 <ComicChip text="The text's language" selected={llmLang === "auto"} onPress={() => setLlmLang("auto")} palette={palette} color={YELLOW} />
-                <ComicChip text="Italian" selected={llmLang === "it"} onPress={() => setLlmLang("it")} palette={palette} color={MINT} />
-                <ComicChip text="English" selected={llmLang === "en"} onPress={() => setLlmLang("en")} palette={palette} color={SKY} />
+                {UI_LANGS.map((l) => (
+                  <ComicChip key={l.code} text={`${l.flag} ${l.name}`} selected={llmLang === l.code} onPress={() => setLlmLang(l.code)} palette={palette} color={MINT} />
+                ))}
               </View>
 
               <ComicButton text="DONE" onPress={() => setSettingsOpen(false)} palette={palette} color={MINT} style={{ marginTop: 24 }} />
@@ -3865,7 +3886,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                   {ai.stage ? ` · ${ai.stage}` : ""}
                 </Text>
                 <ScrollView style={{ marginTop: 8, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
-                  <Text style={[s.chapterText, { fontSize: 17, lineHeight: 26 }]}>{ai.answer || (ai.busy ? "…" : "")}</Text>
+                  <RawText style={[s.chapterText, { fontSize: 17, lineHeight: 26 }]}>{ai.answer || (ai.busy ? "…" : "")}</RawText>
                 </ScrollView>
                 <View style={[s.chipRow, { marginTop: 12 }]}>
                   {ai.busy ? (
@@ -3933,7 +3954,12 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             <Text style={s.voiceHint}>Tap a voice to hear a preview. Your choice is saved automatically.</Text>
             <ScrollView style={{ marginTop: 10, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
               <Text style={s.sheetLabel}>Natural voices · on the phone</Text>
-              {PIPER_KEYS.map((k) => {
+              <View style={[s.chipRow, { marginBottom: 8 }]}>
+                {UI_LANGS.map((l) => (
+                  <ComicChip key={l.code} text={`${l.flag} ${l.name}`} selected={voiceLangFilter === l.code} onPress={() => setVoiceLangFilter(l.code)} palette={palette} color={MINT} />
+                ))}
+              </View>
+              {PIPER_KEYS.filter((k) => voiceLang(PIPER_VOICES[k]) === voiceLangFilter || voiceId === PIPER_PREFIX + k).map((k) => {
                 const v = PIPER_VOICES[k];
                 const id = PIPER_PREFIX + k;
                 const active = voiceId === id;
@@ -3955,7 +3981,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                         {v.label}
                       </Text>
                       <Text style={[s.voiceMeta, active && { color: INK }]} numberOfLines={1}>
-                        {ready ? `${v.note.replace(/ · \d+ MB.*$/, "")} · on the phone` : `${v.note} · tap to download`}
+                        {ready ? `${voiceNote(v, false)} · ${t("on the phone")}` : `${voiceNote(v)} · ${t("tap to download")}`}
                       </Text>
                     </View>
                     {active ? (

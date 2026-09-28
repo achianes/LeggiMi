@@ -3,20 +3,71 @@
 // native module); after that everything is synthesised on the device.
 import { DeviceEventEmitter, NativeModules } from "react-native";
 import RNFS from "react-native-fs";
+import { t } from "../i18n";
 
-export type PiperVoiceKey = "it-paola" | "it-riccardo" | "en-amy" | "en-ryan" | "en-alan" | "en-alba";
+export type PiperVoiceKey = string;
 
-export type PiperVoice = { file: string; bytes: number; label: string; lang: string; note: string };
+export type PiperVoice = {
+  file: string;
+  bytes: number;
+  label: string;
+  /** BCP-47, e.g. "it-IT" */
+  lang: string;
+  gender: "f" | "m" | "";
+  quality: "x_low" | "low" | "medium" | "high";
+};
 
+// int8 Piper voices from the sherpa-onnx "tts-models" release, a few good ones per language
 export const PIPER_VOICES: Record<PiperVoiceKey, PiperVoice> = {
-  "it-paola": { file: "vits-piper-it_IT-paola-medium-int8.tar.bz2", bytes: 21143212, label: "Paola", lang: "it-IT", note: "Italian · female · 21 MB" },
-  "it-riccardo": { file: "vits-piper-it_IT-riccardo-x_low-int8.tar.bz2", bytes: 13329285, label: "Riccardo", lang: "it-IT", note: "Italian · male · 13 MB, fastest" },
-  "en-amy": { file: "vits-piper-en_US-amy-medium-int8.tar.bz2", bytes: 21028122, label: "Amy", lang: "en-US", note: "English (US) · female · 21 MB" },
-  "en-ryan": { file: "vits-piper-en_US-ryan-medium-int8.tar.bz2", bytes: 21083446, label: "Ryan", lang: "en-US", note: "English (US) · male · 21 MB" },
-  "en-alan": { file: "vits-piper-en_GB-alan-medium-int8.tar.bz2", bytes: 21103831, label: "Alan", lang: "en-GB", note: "English (UK) · male · 21 MB" },
-  "en-alba": { file: "vits-piper-en_GB-alba-medium-int8.tar.bz2", bytes: 21104326, label: "Alba", lang: "en-GB", note: "English (UK) · female · 21 MB" },
+  "it-paola": { file: "vits-piper-it_IT-paola-medium-int8.tar.bz2", bytes: 21143212, label: "Paola", lang: "it-IT", gender: "f", quality: "medium" },
+  "it-riccardo": { file: "vits-piper-it_IT-riccardo-x_low-int8.tar.bz2", bytes: 13329285, label: "Riccardo", lang: "it-IT", gender: "m", quality: "x_low" },
+  "it-dii": { file: "vits-piper-it_IT-dii-high-int8.tar.bz2", bytes: 20998284, label: "Dii", lang: "it-IT", gender: "", quality: "high" },
+  "it-miro": { file: "vits-piper-it_IT-miro-high-int8.tar.bz2", bytes: 21238206, label: "Miro", lang: "it-IT", gender: "", quality: "high" },
+  "en-amy": { file: "vits-piper-en_US-amy-medium-int8.tar.bz2", bytes: 21028122, label: "Amy", lang: "en-US", gender: "f", quality: "medium" },
+  "en-ryan": { file: "vits-piper-en_US-ryan-medium-int8.tar.bz2", bytes: 21083446, label: "Ryan", lang: "en-US", gender: "m", quality: "medium" },
+  "en-lessac": { file: "vits-piper-en_US-lessac-medium-int8.tar.bz2", bytes: 20969179, label: "Lessac", lang: "en-US", gender: "f", quality: "medium" },
+  "en-joe": { file: "vits-piper-en_US-joe-medium-int8.tar.bz2", bytes: 21230019, label: "Joe", lang: "en-US", gender: "m", quality: "medium" },
+  "en-kristin": { file: "vits-piper-en_US-kristin-medium-int8.tar.bz2", bytes: 20882061, label: "Kristin", lang: "en-US", gender: "f", quality: "medium" },
+  "en-alan": { file: "vits-piper-en_GB-alan-medium-int8.tar.bz2", bytes: 21103831, label: "Alan", lang: "en-GB", gender: "m", quality: "medium" },
+  "en-alba": { file: "vits-piper-en_GB-alba-medium-int8.tar.bz2", bytes: 21104326, label: "Alba", lang: "en-GB", gender: "f", quality: "medium" },
+  "en-cori": { file: "vits-piper-en_GB-cori-medium-int8.tar.bz2", bytes: 20768736, label: "Cori", lang: "en-GB", gender: "f", quality: "medium" },
+  "en-jenny": { file: "vits-piper-en_GB-jenny_dioco-medium-int8.tar.bz2", bytes: 20950036, label: "Jenny", lang: "en-GB", gender: "f", quality: "medium" },
+  "es-davefx": { file: "vits-piper-es_ES-davefx-medium-int8.tar.bz2", bytes: 21171632, label: "Davefx", lang: "es-ES", gender: "m", quality: "medium" },
+  "es-carlfm": { file: "vits-piper-es_ES-carlfm-x_low-int8.tar.bz2", bytes: 13356095, label: "Carlfm", lang: "es-ES", gender: "m", quality: "x_low" },
+  "es-miro": { file: "vits-piper-es_ES-miro-high-int8.tar.bz2", bytes: 21273088, label: "Miro", lang: "es-ES", gender: "", quality: "high" },
+  "es-ald": { file: "vits-piper-es_MX-ald-medium-int8.tar.bz2", bytes: 21283187, label: "Ald", lang: "es-MX", gender: "m", quality: "medium" },
+  "es-claude": { file: "vits-piper-es_MX-claude-high-int8.tar.bz2", bytes: 21216685, label: "Claude", lang: "es-MX", gender: "", quality: "high" },
+  "es-daniela": { file: "vits-piper-es_AR-daniela-high-int8.tar.bz2", bytes: 35069782, label: "Daniela", lang: "es-AR", gender: "f", quality: "high" },
+  "fr-siwis": { file: "vits-piper-fr_FR-siwis-medium-int8.tar.bz2", bytes: 20914888, label: "Siwis", lang: "fr-FR", gender: "f", quality: "medium" },
+  "fr-tom": { file: "vits-piper-fr_FR-tom-medium-int8.tar.bz2", bytes: 21019617, label: "Tom", lang: "fr-FR", gender: "m", quality: "medium" },
+  "fr-gilles": { file: "vits-piper-fr_FR-gilles-low-int8.tar.bz2", bytes: 21248965, label: "Gilles", lang: "fr-FR", gender: "m", quality: "low" },
+  "fr-miro": { file: "vits-piper-fr_FR-miro-high-int8.tar.bz2", bytes: 21268816, label: "Miro", lang: "fr-FR", gender: "", quality: "high" },
+  "de-thorsten": { file: "vits-piper-de_DE-thorsten-medium-int8.tar.bz2", bytes: 20949833, label: "Thorsten", lang: "de-DE", gender: "m", quality: "medium" },
+  "de-kerstin": { file: "vits-piper-de_DE-kerstin-low-int8.tar.bz2", bytes: 21174728, label: "Kerstin", lang: "de-DE", gender: "f", quality: "low" },
+  "de-ramona": { file: "vits-piper-de_DE-ramona-low-int8.tar.bz2", bytes: 21199380, label: "Ramona", lang: "de-DE", gender: "f", quality: "low" },
+  "de-karlsson": { file: "vits-piper-de_DE-karlsson-low-int8.tar.bz2", bytes: 21126670, label: "Karlsson", lang: "de-DE", gender: "m", quality: "low" },
+  "de-dii": { file: "vits-piper-de_DE-dii-high-int8.tar.bz2", bytes: 21030921, label: "Dii", lang: "de-DE", gender: "", quality: "high" },
+  "de-miro": { file: "vits-piper-de_DE-miro-high-int8.tar.bz2", bytes: 21280966, label: "Miro", lang: "de-DE", gender: "", quality: "high" },
 };
 export const PIPER_KEYS = Object.keys(PIPER_VOICES) as PiperVoiceKey[];
+
+const REGION_NAMES: Record<string, string> = {
+  "it-IT": "Italian", "en-US": "English (US)", "en-GB": "English (UK)", "es-ES": "Spanish (Spain)",
+  "es-MX": "Spanish (Mexico)", "es-AR": "Spanish (Argentina)", "fr-FR": "French", "de-DE": "German",
+};
+const QUALITY: Record<PiperVoice["quality"], string> = { x_low: "fastest", low: "light", medium: "natural", high: "high quality" };
+
+/** "Italian · female · natural · 21 MB", in the app's language */
+export function voiceNote(v: PiperVoice, withSize = true) {
+  const parts = [t(REGION_NAMES[v.lang] ?? v.lang)];
+  if (v.gender) parts.push(t(v.gender === "f" ? "female" : "male"));
+  parts.push(t(QUALITY[v.quality]));
+  if (withSize) parts.push(`${Math.round(v.bytes / 1048576)} MB`);
+  return parts.join(" · ");
+}
+
+/** the language part of a voice: "it", "en"… */
+export const voiceLang = (v: PiperVoice) => v.lang.slice(0, 2);
 
 const VOICE_URL = (file: string) => `https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/${file}`;
 const ROOT = `${RNFS.DocumentDirectoryPath}/piper`;
