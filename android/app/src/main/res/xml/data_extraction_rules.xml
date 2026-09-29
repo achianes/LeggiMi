@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+. Cloud backup: settings, reading positions and the Library list only
+     (25 MB cap). Phone-to-phone transfer has no cap: the documents' text, the scans and
+     the car cache go too. Downloaded voices and models are fetched again when needed. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="database" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="." />
+        <include domain="file" path="library/" />
+        <include domain="file" path="scans/" />
+        <include domain="file" path="auto/" />
+        <include domain="file" path="auto_library.json" />
+    </device-transfer>
+</data-extraction-rules>

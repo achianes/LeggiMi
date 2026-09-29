@@ -23,7 +23,7 @@ import {
 
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { pick, keepLocalCopy, types } from "@react-native-documents/picker";
+import { pick, keepLocalCopy, types, saveDocuments, isErrorWithCode, errorCodes } from "@react-native-documents/picker";
 import RNFS from "react-native-fs";
 import Tts from "react-native-tts";
 import JSZip from "jszip";
@@ -49,7 +49,7 @@ import {
   PIPER_VOICES, PIPER_KEYS, PiperVoiceKey, PIPER_PREFIX, isPiperVoice, piperKeyOf, hasPiperVoice, piperVoiceFolder, voiceNote, voiceLang,
   downloadPiperVoice, cancelPiperDownload, deletePiperVoice, loadPiperVoice, piper,
 } from "./src/speech/piper";
-import CloudSheet, { UploadFile } from "./src/cloud/CloudSheet";
+import type { UploadFile } from "./src/cloud/CloudSheet";
 import { ScanDoc, deleteScan, scanNative, safeFileName, loadScan, needsOcr } from "./src/scan/store";
 import {
   WHISPER_MODELS, WhisperModelKey, isAudio, getModelKey, setModelKey, hasModel, downloadModel, deleteModel,
@@ -1262,8 +1262,19 @@ function AppInner() {
     r?.(k);
   };
 
-  // cloud accounts sheet; with a file it asks where to upload it
-  const [cloudOpen, setCloudOpen] = useState<{ file: UploadFile | null; onUploaded?: () => void } | null>(null);
+  // "Save to…": the system's own save screen (Google Drive, another cloud, a folder).
+  // No account, key or Google project in the app: the phone's providers do the talking.
+  const saveElsewhere = async (f: UploadFile, onSaved?: () => void) => {
+    try {
+      const uri = "file://" + f.path.split("/").map(encodeURIComponent).join("/");
+      const [r] = await saveDocuments({ sourceUris: [uri], mimeType: f.mime, fileName: f.name });
+      if (r?.error) throw new Error(r.error);
+      onSaved?.();
+    } catch (e: any) {
+      if (isErrorWithCode(e) && e.code === errorCodes.OPERATION_CANCELED) return;
+      Alert.alert("Save", String(e?.message ?? e));
+    }
+  };
   const [speechModelLabel, setSpeechModelLabel] = useState("");
   // neural (Piper) voices downloaded on this phone
   const [piperReady, setPiperReady] = useState<Partial<Record<PiperVoiceKey, boolean>>>({});
@@ -2678,11 +2689,11 @@ function AppInner() {
 is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         "✅",
         [
-          { key: "cloud", icon: "☁️", label: "Cloud", sub: "Into the LeggiMi folder of your cloud", color: GRAPE },
+          { key: "cloud", icon: "☁️", label: "Save to…", sub: "Google Drive, another cloud or a folder", color: GRAPE },
           { key: "share", icon: "📤", label: "Share", sub: "Send it to another app", color: SKY },
         ]
       );
-      if (next === "cloud") setCloudOpen({ file: { path: out, name, mime } });
+      if (next === "cloud") await saveElsewhere({ path: out, name, mime });
       else if (next === "share") await scanNative.shareFile(out, mime, name);
     } catch (e: any) {
       Alert.alert("Export", String(e?.message ?? e));
@@ -2750,11 +2761,11 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
 is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         "✅",
         [
-          { key: "cloud", icon: "☁️", label: "Cloud", sub: "Into the LeggiMi folder of your cloud", color: GRAPE },
+          { key: "cloud", icon: "☁️", label: "Save to…", sub: "Google Drive, another cloud or a folder", color: GRAPE },
           { key: "share", icon: "📤", label: "Share", sub: "Send it to another app", color: SKY },
         ]
       );
-      if (next === "cloud") setCloudOpen({ file: { path: out, name, mime: "audio/mp4" } });
+      if (next === "cloud") await saveElsewhere({ path: out, name, mime: "audio/mp4" });
       else if (next === "share") await scanNative.shareFile(out, "audio/mp4", name);
     } catch (err: any) {
       const msg = String(err?.message ?? err);
@@ -2858,9 +2869,9 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     setLibraryOpen(false);
     const ok = await askChoice(
       "MOVE TO CLOUD",
-      `“${e.name}” is uploaded as a PDF to the LeggiMi folder of your cloud. When the upload is done it is removed from this phone (Library, text${e.scanId ? " and scanned pages" : ""}).`,
+      `“${e.name}” is saved as a PDF where you choose: Google Drive, another cloud or a folder. Once it is saved it is removed from this phone (Library, text${e.scanId ? " and scanned pages" : ""}).`,
       "☁️",
-      [{ key: "go", icon: "☁️", label: "Choose the cloud and move", sub: "Nothing is deleted if the upload fails", color: GRAPE }]
+      [{ key: "go", icon: "☁️", label: "Choose where and move", sub: "Nothing is deleted if saving fails", color: GRAPE }]
     );
     if (ok !== "go") return;
     const base = safeFileName(e.name.replace(/\.[a-z0-9]{2,4}$/i, ""));
@@ -2895,21 +2906,18 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
     setTask(null);
     setIsExtracting(false);
-    setCloudOpen({
-      file: { path: out, name, mime: "application/pdf" },
-      onUploaded: () => {
-        if (fileIdRef.current === e.id) {
-          hardStop();
-          setSegments([]);
-          segmentsRef.current = [];
-          setChapters([]);
-          setPicked(null);
-          setFileId(null);
-          fileIdRef.current = null;
-        }
-        removeFromLibrary(e);
-        RNFS.unlink(out).catch(() => {});
-      },
+    await saveElsewhere({ path: out, name, mime: "application/pdf" }, () => {
+      if (fileIdRef.current === e.id) {
+        hardStop();
+        setSegments([]);
+        segmentsRef.current = [];
+        setChapters([]);
+        setPicked(null);
+        setFileId(null);
+        fileIdRef.current = null;
+      }
+      removeFromLibrary(e);
+      RNFS.unlink(out).catch(() => {});
     });
   };
 
@@ -3042,24 +3050,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
     }
   };
 
-  // A document opened from a file (EPUB, PDF, DOCX): once, offer to keep a
-  // copy in the personal cloud so the other phones find it too.
-  const lastFileRef = useRef<{ fid: string; path: string; name: string; mime: string } | null>(null);
-  const offerCloudCopy = async (fid: string) => {
-    const f = lastFileRef.current;
-    if (!f || f.fid !== fid) return;
-    const key = `cloudOffered:${fid}`;
-    try { if (await AsyncStorage.getItem(key)) return; } catch {}
-    AsyncStorage.setItem(key, "1").catch(() => {});
-    if (!(await RNFS.exists(f.path).catch(() => false))) return;
-    const k = await askChoice(
-      "KEEP IT IN YOUR CLOUD?",
-      `“${f.name}” can go to the LeggiMi folder of your cloud, so your other phones and tablets find it too. The file stays on this phone as well.`,
-      "☁️",
-      [{ key: "cloud", icon: "☁️", label: "Upload a copy", sub: "Google Drive, into the LeggiMi folder", color: GRAPE }]
-    );
-    if (k === "cloud") setCloudOpen({ file: { path: f.path, name: f.name, mime: f.mime } });
-  };
 
   const openFileFromUri = async (
     name: string,
@@ -3118,18 +3108,11 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         return;
       }
 
-      // documents worth keeping: remember the file for the cloud offer
-      const keepable = ext === "epub" || ext === "pdf" || ext === "docx" || (mime ?? "").includes("epub") || mime === "application/pdf" || (mime ?? "").includes("wordprocessingml");
-      lastFileRef.current = keepable && !fromPrint
-        ? { fid, path: localPath, name, mime: mime || (ext === "epub" ? "application/epub+zip" : ext === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document") }
-        : null;
-
       if (ext === "docx" || (mime ?? "").includes("wordprocessingml")) {
         const docText = await extractDocxText(localPath);
         const start = await applyTextForCurrentFile(fid, docText, { extracted: true });
         setIsExtracting(false);
         if (autoStart) setTimeout(() => speakFrom(start), 200);
-        offerCloudCopy(fid);
         return;
       }
 
@@ -3140,7 +3123,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
         const start = await applyTextForCurrentFile(fid, book.text, { markdown: true });
         setIsExtracting(false);
         if (autoStart) setTimeout(() => speakFrom(start), 200);
-        offerCloudCopy(fid);
         return;
       }
 
@@ -3742,28 +3724,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
               </View>
               <Text style={[s.voiceHint, { marginTop: 6 }]}>Buttons and messages of the app. The documents are always read in their own language.</Text>
 
-              <Text style={s.sheetLabel}>Cloud drives</Text>
-              <ComicBox
-                palette={palette}
-                color={GRAPE}
-                radius={16}
-                shadow={4}
-                onPress={() => { setSettingsOpen(false); setCloudOpen({ file: null }); }}
-                contentStyle={s.rowSelect}
-              >
-                <Text style={s.rowSelectEmoji}>☁️</Text>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={[s.rowSelectText, { color: INK }]} numberOfLines={1}>Cloud accounts</Text>
-                  <Text style={[s.libMeta, { color: INK }]} numberOfLines={1}>Google Drive</Text>
-                </View>
-                <Text style={[s.rowSelectChevron, { color: INK }]}>›</Text>
-              </ComicBox>
-              <Text style={s.sheetLabel}>Reading position on all your devices</Text>
-              <View style={s.chipRow}>
-                <ComicChip text="On" selected={syncOn} onPress={() => toggleSync(true)} palette={palette} color={GRAPE} />
-                <ComicChip text="Off" selected={!syncOn} onPress={() => toggleSync(false)} palette={palette} color={GRAPE} />
-              </View>
-              <Text style={[s.voiceHint, { marginTop: 6 }]}>Kept in a small file in the LeggiMi folder of your cloud. When you open a document that another device got further into, LeggiMi offers to continue from there.</Text>
 
               <Text style={s.sheetLabel}>Theme</Text>
               <View style={s.chipRow}>
@@ -4050,15 +4010,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             <View style={s.sheetHead}>
               <Text style={s.sheetEmoji}>🕘</Text>
               <PosterTitle text="LIBRARY" palette={palette} size={26} style={{ flex: 1 }} />
-              <ComicIconButton
-                icon="☁️"
-                onPress={() => { setLibraryOpen(false); setCloudOpen({ file: null }); }}
-                palette={palette}
-                color={GRAPE}
-                size={36}
-                fontSize={16}
-                style={{ marginRight: 10 }}
-              />
               {library.length > 0 ? (
                 <ComicButton text="CLEAN" icon="🧹" onPress={clearLibrary} palette={palette} color={palette.surface2} compact />
               ) : null}
@@ -4066,7 +4017,7 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
             {library.length === 0 ? (
               <Text style={s.voiceHint}>Everything you open, share or print to LeggiMi ends up here, with the point you reached. Nothing yet.</Text>
             ) : (
-              <Text style={s.voiceHint}>Tap a document to pick up where you left off. 📤 saves or sends it, ☁️ moves it to your cloud.</Text>
+              <Text style={s.voiceHint}>Tap a document to pick up where you left off. 📤 saves or sends it, ☁️ moves it off the phone (Google Drive, another cloud or a folder).</Text>
             )}
             <ScrollView style={{ marginTop: 10, flexGrow: 0, flexShrink: 1 }} showsVerticalScrollIndicator={false}>
               {library.map((e) => {
@@ -4197,19 +4148,10 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
           onSaved={onScanSaved}
           onDeleted={onScanDeleted}
           onRead={onScanRead}
-          onCloudExport={(f) => setCloudOpen({ file: f })}
+          onCloudExport={(f) => saveElsewhere(f)}
         />
       ) : null}
 
-      {/* CLOUD ACCOUNTS / UPLOAD */}
-      <CloudSheet
-        visible={!!cloudOpen}
-        palette={palette}
-        bottomInset={insets.bottom}
-        file={cloudOpen?.file ?? null}
-        onUploaded={cloudOpen?.onUploaded}
-        onClose={() => setCloudOpen(null)}
-      />
 
       {/* Web link shared to LeggiMi: loaded here, hidden, and reduced to its article */}
       {linkFetch ? (
@@ -4266,7 +4208,6 @@ is in ${where.replace(/\/[^/]+$/, "")}. Send it somewhere else too?`,
                 pendingAutoStartRef.current = false;
                 setTimeout(() => speakFrom(start), 250);
               }
-              if (fileIdRef.current) offerCloudCopy(fileIdRef.current);
             };
 
             // ---- one OCR page rendered by pdf.js

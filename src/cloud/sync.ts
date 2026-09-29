@@ -19,8 +19,16 @@ export async function setSyncOn(on: boolean) {
   await AsyncStorage.setItem(SETTING, on ? "1" : "0");
 }
 
+/**
+ * Cloud accounts (Google sign-in through the developer's own Google project) are switched
+ * off: LeggiMi is a local app, and files leave the phone only through the system's
+ * "Save to…" screen. With no account, the position sync below never runs.
+ */
+export const CLOUD_ACCOUNTS = false;
+
 /** the account used for sync: the first one configured */
 export async function syncAccountId(): Promise<string | null> {
+  if (!CLOUD_ACCOUNTS) return null;
   const list = await loadAccounts();
   return list.length ? list[0].id : null;
 }

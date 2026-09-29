@@ -856,7 +856,7 @@ export default function ScanStudio(props: Props) {
                 <Text style={s.optTitle}>{afterSave.file.name}</Text>
                 <Text style={s.optSub}>is in {afterSave.where}. Send it somewhere else too?</Text>
                 {props.onCloudExport ? (
-                  <ComicButton text="CLOUD" icon="☁️" onPress={() => afterSaveTo("cloud")} palette={palette} color={GRAPE} style={{ marginTop: 14 }} />
+                  <ComicButton text="SAVE TO…" icon="☁️" onPress={() => afterSaveTo("cloud")} palette={palette} color={GRAPE} style={{ marginTop: 14 }} />
                 ) : null}
                 <ComicButton text="SHARE" icon="📤" onPress={() => afterSaveTo("share")} palette={palette} color={SKY} style={{ marginTop: 12 }} />
                 <ComicButton text="DONE" onPress={() => setAfterSave(null)} palette={palette} color={palette.surface2} compact style={{ marginTop: 12 }} />

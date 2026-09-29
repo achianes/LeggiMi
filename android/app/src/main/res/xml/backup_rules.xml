@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older: settings, reading positions and the Library list (AsyncStorage).
+     Documents' text, scans and downloaded models stay out: Google's cloud backup has a
+     25 MB cap and drops everything when it is exceeded. Cloud secrets (SecretStore) never
+     leave the phone: they are sealed with a key of this phone anyway. -->
+<full-backup-content>
+    <include domain="database" path="." />
+</full-backup-content>
